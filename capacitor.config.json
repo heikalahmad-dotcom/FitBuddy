@@ -1,0 +1,8 @@
+{
+  "appId": "com.fitbuddy.app",
+  "appName": "FitBuddy",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "https"
+  }
+}
