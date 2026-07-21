@@ -51,6 +51,26 @@ npx cap add android
 This creates `ios/` and `android/` folders containing real Xcode and Android
 Studio projects that embed your `www/` folder as the app's UI.
 
+## Required: camera permission (iOS only, one-time)
+
+The "📷 Snap a meal photo" feature uses [`@capacitor/camera`](https://capacitorjs.com/docs/apis/camera)
+to open the native camera (see `takeMealPhoto` in `app.js`). Calling it
+automatically triggers the OS permission prompt on both platforms — but
+**iOS additionally requires you to declare *why* you need the camera**, or
+the app will crash (not just deny permission) the moment a user taps
+"Open camera."
+
+Right after `npx cap add ios`, open `ios/App/App/Info.plist` and add:
+
+```xml
+<key>NSCameraUsageDescription</key>
+<string>FitBuddy uses your camera to estimate calories from a photo of your meal.</string>
+```
+
+Android needs no manual step — `@capacitor/camera` declares the `CAMERA`
+permission in its own manifest, which `npx cap sync` merges into your app's
+manifest automatically, and the runtime permission prompt fires on its own.
+
 ## Whenever you edit www/ (html/css/js)
 
 Any time you or I change files inside `www/`, sync those changes into the

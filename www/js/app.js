@@ -34,6 +34,52 @@ const MEAL_DB = {
   ]
 };
 const UNHEALTHY_KEYWORDS = ["chips","soda","candy","fries","cookie","chocolate bar","donut","cake","ice cream","fast food","pizza slice","energy drink"];
+const MEAL_SLOT_SHARE = {breakfast:0.25, lunch:0.3, dinner:0.3, snack:0.15};
+
+/* rough calorie density (kcal per 100g) by food keyword, most calorie-dense/
+   specific first — used to read a free-text food entry + its weight and
+   estimate calories without the user having to know/guess the number */
+const FOOD_CALORIE_DENSITY = [
+  {match:/butter|\boil\b|mayo/, calPer100g:720},
+  {match:/nuts?|almond|peanut|cashew|walnut/, calPer100g:580},
+  {match:/chips|fries|crisps/, calPer100g:540},
+  {match:/chocolate|candy|cookie|donut|doughnut|cake|pastry/, calPer100g:480},
+  {match:/bacon|sausage|salami|pepperoni/, calPer100g:420},
+  {match:/cheese/, calPer100g:400},
+  {match:/burger|steak|red meat|beef/, calPer100g:250},
+  {match:/pizza/, calPer100g:270},
+  {match:/bread|bagel|toast|bun\b|roll/, calPer100g:270},
+  {match:/ice cream/, calPer100g:210},
+  {match:/avocado/, calPer100g:160},
+  {match:/chicken|turkey|poultry/, calPer100g:165},
+  {match:/egg/, calPer100g:155},
+  {match:/fish|salmon|tuna|shrimp|seafood/, calPer100g:150},
+  {match:/rice|pasta|noodle|quinoa/, calPer100g:150},
+  {match:/wine/, calPer100g:83},
+  {match:/beer/, calPer100g:43},
+  {match:/soda|cola|juice|energy drink/, calPer100g:42},
+  {match:/yogurt|yoghurt/, calPer100g:100},
+  {match:/milk/, calPer100g:60},
+  {match:/banana|apple|pear|orange|fruit/, calPer100g:60},
+  {match:/berry|berries|strawberr|blueberr/, calPer100g:45},
+  {match:/salad|lettuce|spinach|greens|vegetable|veggie|broccoli/, calPer100g:35},
+];
+const DEFAULT_CAL_PER_100G = 180; // reasonable fallback for unrecognized mixed foods
+function estimateCaloriesForFood(name, weightGrams){
+  const lower = (name||"").toLowerCase();
+  const hit = FOOD_CALORIE_DENSITY.find(f=>f.match.test(lower));
+  const density = hit ? hit.calPer100g : DEFAULT_CAL_PER_100G;
+  return Math.round(density * (+weightGrams||0) / 100);
+}
+
+const WORKOUT_DIFFICULTY_KEYWORDS = ["hard","tough","difficult","tired","exhausted","rough","struggle","weak","sore","hurt","drained","dead","awful","terrible","brutal","bad","couldn't","hate","rest"];
+const WORKOUT_POSITIVE_KEYWORDS = ["great","easy","good","strong","amazing","awesome","solid","crushed","fine","smooth","fantastic","energized","pumped","nice"];
+function classifyWorkoutFeeling(text){
+  const lower = (text||"").toLowerCase();
+  if(WORKOUT_DIFFICULTY_KEYWORDS.some(k=>lower.includes(k))) return "difficulty";
+  if(WORKOUT_POSITIVE_KEYWORDS.some(k=>lower.includes(k))) return "positive";
+  return "positive"; // unclear/neutral answers default to the encouraging path
+}
 
 const GYM_WORKOUT_TEMPLATES = {
   2: [
@@ -155,9 +201,42 @@ const EXERCISE_TIPS = {
   "Deadlift":"Keep the bar close to your shins and drive through your whole foot.",
 };
 function getTip(name){ return EXERCISE_TIPS[name] || "Move with control and focus on good form over speed."; }
+
+/* classifies an exercise name into a broad movement pattern so we can show a
+   representative looping animation without needing bespoke art per exercise */
+function getMovementPattern(name){
+  const n = name.toLowerCase();
+  if(/plank|crunch|handstand/.test(n)) return "core";
+  if(/deadlift|hip thrust|glute bridge|hyperextension|superman/.test(n)) return "hinge";
+  if(/leg curl|calf raise|knee raise|lateral raise|y-raise/.test(n)) return "raise";
+  if(/curl|pushdown|bicep/.test(n)) return "curl";
+  if(/row|pulldown|pull-up|pull up|face pull|snow angel/.test(n)) return "row";
+  if(/squat|lunge|step-up|step up|leg press/.test(n)) return "squat";
+  if(/push|press|dip|fly|shoulder tap/.test(n)) return "push";
+  if(/jump|sprint|bike/.test(n)) return "cardio";
+  return "push";
+}
 function setCountFromScheme(scheme){
   const m = scheme.match(/^(\d+)x/);
   return m ? parseInt(m[1],10) : 3;
+}
+
+/* ---- adaptive learning: disliked foods & struggling exercises ---- */
+const FOOD_DISLIKE_THRESHOLD = 3;
+const EXERCISE_SKIP_THRESHOLD = 3;
+const ALL_EXERCISE_NAMES = (()=>{
+  const names = new Set();
+  [GYM_WORKOUT_TEMPLATES, HOME_WORKOUT_TEMPLATES].forEach(templates=>{
+    Object.values(templates).forEach(days=>days.forEach(d=>d.ex.forEach(([name])=>names.add(name))));
+  });
+  return Array.from(names);
+})();
+function pickReplacementExercise(currentName, excludeNames){
+  const pattern = getMovementPattern(currentName);
+  return ALL_EXERCISE_NAMES.find(n=>n!==currentName && !excludeNames.includes(n) && getMovementPattern(n)===pattern) || null;
+}
+function effectiveExerciseName(name){
+  return state.exerciseSwaps[name] || name;
 }
 
 let state = {
@@ -172,6 +251,10 @@ let state = {
   insightShown: false,
   monthlyChecked: [],
   inactivityNudgeShown: false,
+  foodSwapCounts: {}, // mealName -> consecutive times swapped away from
+  dislikedFoods: [], // mealNames we've learned to stop suggesting
+  exerciseSkipCounts: {}, // exerciseName -> consecutive workout days with 0 sets logged
+  exerciseSwaps: {}, // original template exercise name -> substituted exercise name
   modal: null, // {type,...}
   chat: {
     open: false,
@@ -232,6 +315,20 @@ function calcPlan(p){
   return {calories, protein, carbs, fat, tdee:Math.round(tdee), weeklyRate, weeksToGoal, startWeight:p.weight};
 }
 
+/* scales a meal's calories & macros to a specific target, preserving its
+   nutrient ratios — i.e. recommending a bigger/smaller portion of the same
+   meal rather than a fixed serving size that may fall short of (or exceed)
+   what the day's calorie target actually needs */
+function scaleMealToTarget(meal, targetCal){
+  const ratio = targetCal / meal.cal;
+  return {
+    ...meal,
+    cal: Math.round(targetCal),
+    p: Math.round(meal.p*ratio),
+    c: Math.round(meal.c*ratio),
+    f: Math.round(meal.f*ratio),
+  };
+}
 function pickMeal(slot, dietPref, targetCal, excludeNames, allergies){
   excludeNames = excludeNames||[];
   allergies = allergies||[];
@@ -246,15 +343,14 @@ function pickMeal(slot, dietPref, targetCal, excludeNames, allergies){
     const diff = Math.abs(m.cal-targetCal);
     if(diff<bestDiff){bestDiff=diff; best=m;}
   });
-  return {...best};
+  return scaleMealToTarget(best, targetCal);
 }
 
 function buildMealPlan(p, plan, currentMeals){
-  const props = {breakfast:0.25, lunch:0.3, dinner:0.3, snack:0.15};
   const meals = {};
   ["breakfast","lunch","dinner","snack"].forEach(slot=>{
-    const target = plan.calories*props[slot];
-    const exclude = currentMeals && currentMeals[slot] ? [currentMeals[slot].name] : [];
+    const target = plan.calories*MEAL_SLOT_SHARE[slot];
+    const exclude = (currentMeals && currentMeals[slot] ? [currentMeals[slot].name] : []).concat(state.dislikedFoods||[]);
     meals[slot] = pickMeal(slot, p.dietPref, target, exclude, p.allergies);
   });
   return meals;
@@ -442,6 +538,10 @@ function saveState(){
       insightShown: state.insightShown,
       monthlyChecked: state.monthlyChecked,
       inactivityNudgeShown: state.inactivityNudgeShown,
+      foodSwapCounts: state.foodSwapCounts,
+      dislikedFoods: state.dislikedFoods,
+      exerciseSkipCounts: state.exerciseSkipCounts,
+      exerciseSwaps: state.exerciseSwaps,
       chat: state.chat,
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(persist));
@@ -459,7 +559,25 @@ function loadState(){
 }
 
 /* ============================= RENDER ROOT ============================= */
+/* Every render() call rebuilds the relevant innerHTML from scratch (no vdom
+   diffing), which would normally drop focus/cursor position out of whatever
+   input the user is mid-typing in. Save and restore it around the rebuild. */
+function captureFocus(){
+  const el = document.activeElement;
+  if(!el || !el.id || (el.tagName!=="INPUT" && el.tagName!=="TEXTAREA")) return null;
+  return {id: el.id, start: el.selectionStart, end: el.selectionEnd};
+}
+function restoreFocus(saved){
+  if(!saved) return;
+  const el = document.getElementById(saved.id);
+  if(!el) return;
+  el.focus();
+  if(saved.start!=null && typeof el.setSelectionRange==="function"){
+    try{ el.setSelectionRange(saved.start, saved.end); }catch(e){ /* not a text-selectable input type */ }
+  }
+}
 function render(){
+  const focused = captureFocus();
   const app = document.getElementById("app");
   if(state.screen==="onboarding"){
     app.innerHTML = renderOnboarding();
@@ -471,11 +589,13 @@ function render(){
   const demo = document.getElementById("demo-controls-slot");
   if(demo) demo.outerHTML = renderDemoControls();
   updateChatWidget();
+  document.querySelectorAll(".modal-overlay").forEach(el=>el.remove());
   if(state.modal){
     const holder = document.createElement("div");
     holder.innerHTML = renderModal();
     document.body.appendChild(holder.firstElementChild);
   }
+  restoreFocus(focused);
   saveState();
 }
 
@@ -491,7 +611,7 @@ function renderOnboarding(){
     body = `
       <div class="field">
         <label>What should we call you?</label>
-        <input type="text" placeholder="Your name" value="${p.name||''}" oninput="setProfile('name', this.value)">
+        <input id="ob-name" type="text" placeholder="Your name" value="${p.name||''}" oninput="setProfile('name', this.value)">
       </div>`;
   } else if(step==="goal"){
     body = `
@@ -515,16 +635,16 @@ function renderOnboarding(){
           </select>
         </div>
         <div class="field"><label>Age</label>
-          <input type="number" min="16" max="90" value="${p.age||''}" oninput="setProfile('age', +this.value)">
+          <input id="ob-age" type="number" min="16" max="90" value="${p.age||''}" oninput="setProfile('age', +this.value)">
         </div>
         <div class="field"><label>Height (cm)</label>
-          <input type="number" min="120" max="230" value="${p.height||''}" oninput="setProfile('height', +this.value)">
+          <input id="ob-height" type="number" min="120" max="230" value="${p.height||''}" oninput="setProfile('height', +this.value)">
         </div>
         <div class="field"><label>Current weight (kg)</label>
-          <input type="number" min="35" max="220" value="${p.weight||''}" oninput="setProfile('weight', +this.value)">
+          <input id="ob-weight" type="number" min="35" max="220" value="${p.weight||''}" oninput="setProfile('weight', +this.value)">
         </div>
         <div class="field"><label>Target weight (kg)</label>
-          <input type="number" min="35" max="220" value="${p.targetWeight||''}" oninput="setTargetWeightManual(+this.value)">
+          <input id="ob-target-weight" type="number" min="35" max="220" value="${p.targetWeight||''}" oninput="setTargetWeightManual(+this.value)">
           ${(p.goal && p.weight && p.height) ? `<div class="empty-note" style="padding-top:4px;">Estimated for your goal: <span class="mono" style="color:var(--amber)">${estimateTargetWeight(p.goal,p.weight,p.height)}kg</span> — feel free to adjust.</div>` : ""}
         </div>
       </div>`;
@@ -778,11 +898,13 @@ function renderToday(){
       </div>
       ${todaysWorkout.ex.map(([name,scheme],idx)=>{
         const done = isExerciseDone(idx);
+        const displayName = effectiveExerciseName(name);
         return `
         <div class="ledger-row">
           <div class="ledger-main">
             <span class="ledger-check ${done?'done':''}" style="pointer-events:none;">${done?'✓':''}</span>
-            <span class="ledger-name">${name}</span>
+            <div class="exercise-thumb">${exerciseIconSVG(displayName)}</div>
+            <span class="ledger-name">${displayName}</span>
           </div>
           <div class="ledger-meta">${scheme}</div>
         </div>`;
@@ -853,7 +975,7 @@ function toggleWorkoutDone(){
   if(log.workoutDone) markActivityToday();
   render();
   if(log.workoutDone){
-    setTimeout(()=>{ openModal('motivation'); }, 150);
+    setTimeout(()=>{ openModal('workoutFeedback'); }, 150);
   }
 }
 
@@ -878,10 +1000,45 @@ function toggleSet(exIdx, setIdx){
   render();
 }
 function finishSession(){
+  const workoutIdx = (state.today-1) % state.profile.workoutDays;
+  const day = getWorkoutTemplates()[state.profile.workoutDays][workoutIdx];
+  const log = todayLog();
+  const dayExerciseNames = day.ex.map(([n])=>effectiveExerciseName(n));
+  let swapNotice = null;
+  day.ex.forEach(([templateName], idx)=>{
+    const doneArr = log.setsDone[idx]||[];
+    const anySetDone = doneArr.some(Boolean);
+    if(anySetDone){
+      state.exerciseSkipCounts[templateName] = 0;
+      return;
+    }
+    state.exerciseSkipCounts[templateName] = (state.exerciseSkipCounts[templateName]||0) + 1;
+    if(!swapNotice && state.exerciseSkipCounts[templateName] >= EXERCISE_SKIP_THRESHOLD){
+      const current = effectiveExerciseName(templateName);
+      const exclude = [templateName, current, ...dayExerciseNames];
+      const replacement = pickReplacementExercise(current, exclude);
+      if(replacement){
+        state.exerciseSwaps[templateName] = replacement;
+        state.exerciseSkipCounts[templateName] = 0;
+        swapNotice = {from:current, to:replacement};
+      }
+    }
+  });
   todayLog().workoutDone = true;
   markActivityToday();
   closeSession();
-  setTimeout(()=>{ openModal('motivation'); }, 150);
+  if(swapNotice){
+    state.modal = {type:"exerciseSwapNotice", from:swapNotice.from, to:swapNotice.to};
+    render();
+  } else {
+    setTimeout(()=>{ openModal('workoutFeedback'); }, 150);
+  }
+}
+function submitWorkoutFeedback(text){
+  const mood = classifyWorkoutFeeling(text);
+  closeModal();
+  state.modal = {type:"workoutFeedbackResult", mood};
+  render();
 }
 
 function renderSessionScreen(){
@@ -920,6 +1077,7 @@ function renderSessionScreen(){
 }
 
 function renderAccordionRow(name, scheme, idx){
+  const displayName = effectiveExerciseName(name);
   const expanded = state.session.expandedIdx===idx;
   const setCount = setCountFromScheme(scheme);
   const log = todayLog();
@@ -927,16 +1085,15 @@ function renderAccordionRow(name, scheme, idx){
   return `
     <div class="accordion-row ${expanded?'expanded':''}">
       <div class="accordion-head" style="cursor:pointer;" onclick="toggleExpand(${idx})">
-        <span>${name}</span>
+        <span>${displayName}</span>
         <span><span class="scheme-chip">${scheme}</span>${expanded?'▲':'▼'}</span>
       </div>
       ${expanded?`
         <div class="accordion-panel">
           <div class="thumb">
-            ${exerciseThumbSVG()}
-            <div class="play-btn">▶</div>
+            ${exerciseSceneSVG(displayName)}
           </div>
-          <div class="exercise-tip">${getTip(name)}</div>
+          <div class="exercise-tip">${getTip(displayName)}</div>
           <div class="set-row">
             ${Array.from({length:setCount}).map((_,i)=>{
               const done = !!doneArr[i];
@@ -947,20 +1104,106 @@ function renderAccordionRow(name, scheme, idx){
     </div>`;
 }
 
-function exerciseThumbSVG(){
+/* looping line-art stick-figure animation for a given movement pattern.
+   only the joints relevant to that pattern are animated; everything else
+   stays put so each pose reads clearly at a glance. */
+function movementFigureGroup(pattern){
+  const S = `stroke="#E9EAF0" stroke-width="4" fill="none" stroke-linecap="round" stroke-linejoin="round"`;
+  if(pattern==="squat"){
+    return `<g ${S}>
+      <circle cx="100" cy="30" r="9" fill="#E9EAF0" stroke="none"><animate attributeName="cy" values="30;40;30" dur="1.3s" repeatCount="indefinite"/></circle>
+      <line x1="100" x2="100" y1="39" y2="68"><animate attributeName="y1" values="39;49;39" dur="1.3s" repeatCount="indefinite"/><animate attributeName="y2" values="68;78;68" dur="1.3s" repeatCount="indefinite"/></line>
+      <line x1="100" y1="45" x2="118" y2="58"><animate attributeName="y1" values="45;55;45" dur="1.3s" repeatCount="indefinite"/><animate attributeName="y2" values="58;66;58" dur="1.3s" repeatCount="indefinite"/></line>
+      <line x1="100" y1="45" x2="82" y2="58"><animate attributeName="y1" values="45;55;45" dur="1.3s" repeatCount="indefinite"/><animate attributeName="y2" values="58;66;58" dur="1.3s" repeatCount="indefinite"/></line>
+      <line x1="100" y1="68" x2="85" y2="112"><animate attributeName="y1" values="68;78;68" dur="1.3s" repeatCount="indefinite"/></line>
+      <line x1="100" y1="68" x2="115" y2="112"><animate attributeName="y1" values="68;78;68" dur="1.3s" repeatCount="indefinite"/></line>
+    </g>`;
+  }
+  if(pattern==="push"){
+    return `<g ${S}>
+      <circle cx="100" cy="30" r="9" fill="#E9EAF0" stroke="none"/>
+      <line x1="100" y1="39" x2="100" y2="68"/>
+      <line x1="100" y1="45" x2="80" y2="55"><animate attributeName="x2" values="80;70;80" dur="1.2s" repeatCount="indefinite"/><animate attributeName="y2" values="55;25;55" dur="1.2s" repeatCount="indefinite"/></line>
+      <line x1="100" y1="45" x2="120" y2="55"><animate attributeName="x2" values="120;130;120" dur="1.2s" repeatCount="indefinite"/><animate attributeName="y2" values="55;25;55" dur="1.2s" repeatCount="indefinite"/></line>
+      <line x1="100" y1="68" x2="85" y2="112"/>
+      <line x1="100" y1="68" x2="115" y2="112"/>
+    </g>`;
+  }
+  if(pattern==="row"){
+    return `<g ${S}>
+      <circle cx="100" cy="30" r="9" fill="#E9EAF0" stroke="none"/>
+      <line x1="100" y1="39" x2="100" y2="68"/>
+      <line x1="100" y1="48" x2="140" y2="50"><animate attributeName="x2" values="140;105;140" dur="1.2s" repeatCount="indefinite"/></line>
+      <line x1="100" y1="48" x2="60" y2="50"><animate attributeName="x2" values="60;95;60" dur="1.2s" repeatCount="indefinite"/></line>
+      <line x1="100" y1="68" x2="85" y2="112"/>
+      <line x1="100" y1="68" x2="115" y2="112"/>
+    </g>`;
+  }
+  if(pattern==="hinge"){
+    return `<g ${S}>
+      <circle cx="100" cy="30" r="9" fill="#E9EAF0" stroke="none"><animate attributeName="cy" values="30;52;30" dur="1.4s" repeatCount="indefinite"/><animate attributeName="cx" values="100;112;100" dur="1.4s" repeatCount="indefinite"/></circle>
+      <line x1="100" y1="39" x2="100" y2="68"><animate attributeName="x1" values="100;112;100" dur="1.4s" repeatCount="indefinite"/><animate attributeName="y1" values="39;58;39" dur="1.4s" repeatCount="indefinite"/></line>
+      <line x1="100" y1="46" x2="108" y2="75"><animate attributeName="x1" values="100;112;100" dur="1.4s" repeatCount="indefinite"/><animate attributeName="y1" values="46;62;46" dur="1.4s" repeatCount="indefinite"/><animate attributeName="x2" values="108;120;108" dur="1.4s" repeatCount="indefinite"/><animate attributeName="y2" values="75;95;75" dur="1.4s" repeatCount="indefinite"/></line>
+      <line x1="100" y1="68" x2="85" y2="112"/>
+      <line x1="100" y1="68" x2="115" y2="112"/>
+    </g>`;
+  }
+  if(pattern==="curl"){
+    return `<g ${S}>
+      <circle cx="100" cy="30" r="9" fill="#E9EAF0" stroke="none"/>
+      <line x1="100" y1="39" x2="100" y2="68"/>
+      <line x1="100" y1="45" x2="115" y2="60"/>
+      <line x1="115" y1="60" x2="115" y2="85"><animate attributeName="y2" values="85;50;85" dur="1.1s" repeatCount="indefinite"/></line>
+      <line x1="100" y1="45" x2="85" y2="60"/>
+      <line x1="85" y1="60" x2="85" y2="85"><animate attributeName="y2" values="85;50;85" dur="1.1s" repeatCount="indefinite"/></line>
+      <line x1="100" y1="68" x2="85" y2="112"/>
+      <line x1="100" y1="68" x2="115" y2="112"/>
+    </g>`;
+  }
+  if(pattern==="raise"){
+    return `<g ${S}>
+      <circle cx="100" cy="30" r="9" fill="#E9EAF0" stroke="none"/>
+      <line x1="100" y1="39" x2="100" y2="68"/>
+      <line x1="100" y1="45" x2="105" y2="68"><animate attributeName="x2" values="105;135;105" dur="1.2s" repeatCount="indefinite"/><animate attributeName="y2" values="68;45;68" dur="1.2s" repeatCount="indefinite"/></line>
+      <line x1="100" y1="45" x2="95" y2="68"><animate attributeName="x2" values="95;65;95" dur="1.2s" repeatCount="indefinite"/><animate attributeName="y2" values="68;45;68" dur="1.2s" repeatCount="indefinite"/></line>
+      <line x1="100" y1="68" x2="85" y2="112"/>
+      <line x1="100" y1="68" x2="115" y2="112"/>
+    </g>`;
+  }
+  if(pattern==="core"){
+    return `<g ${S}>
+      <animate attributeName="opacity" values="0.8;1;0.8" dur="1.8s" repeatCount="indefinite"/>
+      <circle cx="45" cy="70" r="9" fill="#E9EAF0" stroke="none"/>
+      <line x1="54" y1="70" x2="140" y2="70"/>
+      <line x1="140" y1="70" x2="168" y2="80"/>
+      <line x1="54" y1="70" x2="54" y2="98"/>
+    </g>`;
+  }
+  /* cardio */
+  return `<g ${S}>
+    <circle cx="100" cy="30" r="9" fill="#E9EAF0" stroke="none"/>
+    <line x1="100" y1="39" x2="100" y2="68"/>
+    <line x1="100" y1="45" x2="75" y2="55"><animate attributeName="x2" values="75;60;75" dur="0.9s" repeatCount="indefinite"/><animate attributeName="y2" values="55;30;55" dur="0.9s" repeatCount="indefinite"/></line>
+    <line x1="100" y1="45" x2="125" y2="55"><animate attributeName="x2" values="125;140;125" dur="0.9s" repeatCount="indefinite"/><animate attributeName="y2" values="55;30;55" dur="0.9s" repeatCount="indefinite"/></line>
+    <line x1="100" y1="68" x2="85" y2="110"><animate attributeName="x2" values="85;65;85" dur="0.9s" repeatCount="indefinite"/><animate attributeName="y2" values="110;115;110" dur="0.9s" repeatCount="indefinite"/></line>
+    <line x1="100" y1="68" x2="115" y2="110"><animate attributeName="x2" values="115;135;115" dur="0.9s" repeatCount="indefinite"/><animate attributeName="y2" values="110;115;110" dur="0.9s" repeatCount="indefinite"/></line>
+  </g>`;
+}
+/* large scene version used in the workout session's expanded exercise panel */
+function exerciseSceneSVG(name){
+  const pattern = getMovementPattern(name);
   return `
   <svg viewBox="0 0 200 125" preserveAspectRatio="xMidYMid slice" xmlns="http://www.w3.org/2000/svg">
     <rect width="200" height="125" fill="#1c2130"/>
     <circle cx="160" cy="20" r="30" fill="rgba(255,107,61,0.12)"/>
     <circle cx="20" cy="110" r="40" fill="rgba(255,107,61,0.08)"/>
-    <g stroke="#E9EAF0" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity="0.85">
-      <circle cx="70" cy="55" r="8" fill="#E9EAF0" stroke="none"/>
-      <path d="M78 60 L120 68 L150 55"/>
-      <path d="M78 60 L60 90 L40 100"/>
-      <path d="M120 68 L128 100 L110 108"/>
-      <path d="M78 60 L95 92 L115 96"/>
-    </g>
+    ${movementFigureGroup(pattern)}
   </svg>`;
+}
+/* compact circular icon version used next to exercise rows in lists */
+function exerciseIconSVG(name){
+  const pattern = getMovementPattern(name);
+  return `<svg viewBox="45 15 110 105" xmlns="http://www.w3.org/2000/svg">${movementFigureGroup(pattern)}</svg>`;
 }
 
 /* ============================= SPEAK TO YOUR FITBUDDY (chat widget) ============================= */
@@ -1033,11 +1276,33 @@ function generateBotReply(raw){
   if(/\b(hi|hello|hey)\b/.test(text)){
     return `Hey! Day ${state.today}${streak>0?`, ${streak}-day streak going`:""} — what can I help with?`;
   }
+  if(/dislik|don.?t like|not a fan|which foods|hate.*food/.test(text)){
+    if(state.dislikedFoods.length){
+      return `So far, since you kept swapping ${state.dislikedFoods.length>1?"them":"it"} out, I've learned you're not into ${state.dislikedFoods.join(", ")} — I've stopped suggesting ${state.dislikedFoods.length>1?"those":"that"}.`;
+    }
+    return `You haven't ruled out any foods yet — if you keep swapping the same meal away, I'll learn to stop suggesting it.`;
+  }
+  if(/swap.*exercise|exercise.*swap|struggl.*exercise|replaced.*exercise|which exercise/.test(text)){
+    const swaps = Object.entries(state.exerciseSwaps);
+    if(swaps.length){
+      return `I've swapped ${swaps.map(([from,to])=>`${from} for ${to}`).join(", ")} since you kept skipping ${swaps.length>1?"them":"it"} — the replacements train similar muscles.`;
+    }
+    return `No exercise swaps yet — if you keep skipping the same move a few workouts in a row, I'll suggest a similar alternative automatically.`;
+  }
   if(/calor/.test(text) || /(how much).*(eat|left)/.test(text)){
     return `You've logged ${fmt(loggedCal)} of your ${fmt(plan.calories)} kcal target today — about ${fmt(remaining)} kcal left.`;
   }
   if(/protein|macro|carb|fat/.test(text)){
     return `Your daily targets are ${plan.protein}g protein, ${plan.carbs}g carbs, and ${plan.fat}g fat.`;
+  }
+  if(/\bweight\b/.test(text)){
+    const wlog = state.weightLog;
+    const cur = wlog[wlog.length-1].weight, start = wlog[0].weight, target = state.profile.targetWeight;
+    const delta = Math.round(Math.abs(start-cur)*10)/10;
+    const direction = cur<start ? "down" : cur>start ? "up" : null;
+    return direction
+      ? `You've gone from ${start}kg to ${cur}kg (${delta}kg ${direction}) — goal is ${target}kg. Check the Progress tab for the full trend chart.`
+      : `You're holding steady at ${cur}kg so far. Goal is ${target}kg — check the Progress tab for the full trend chart.`;
   }
   if(/workout|exercise|train|session/.test(text)){
     return log.workoutDone
@@ -1059,20 +1324,38 @@ function generateBotReply(raw){
   if(/tired|hard|give up|can.?t|discourag|struggl|stress/.test(text)){
     return `Tough days happen to everyone. ${motivationalMessage()}`;
   }
-  return `Got it! I can help most with questions about your calories, macros, today's workout, streak, or progress toward your goal — try asking me one of those.`;
+  return `Got it! I can help most with questions about your calories, macros, today's workout, streak, weight trend, or progress toward your goal — or ask what foods/exercises I've learned to adjust for you.`;
 }
 
 /* ---- swap ---- */
 function doSwap(slot){
   const current = state.plan.meals[slot];
-  const target = state.plan.calories*({breakfast:0.25,lunch:0.3,dinner:0.3,snack:0.15}[slot]);
-  const next = pickMeal(slot, state.profile.dietPref, target, [current.name], state.profile.allergies);
+  state.foodSwapCounts[current.name] = (state.foodSwapCounts[current.name]||0) + 1;
+  let justDisliked = null;
+  if(state.foodSwapCounts[current.name] >= FOOD_DISLIKE_THRESHOLD && !state.dislikedFoods.includes(current.name)){
+    state.dislikedFoods.push(current.name);
+    justDisliked = current.name;
+  }
+  const target = state.plan.calories*MEAL_SLOT_SHARE[slot];
+  const exclude = [current.name, ...state.dislikedFoods];
+  const next = pickMeal(slot, state.profile.dietPref, target, exclude, state.profile.allergies);
   state.plan.meals[slot] = next;
   closeModal();
+  if(justDisliked) state.modal = {type:"foodDisliked", name:justDisliked};
   render();
 }
 
 /* ---- extra/log something else ---- */
+function updateExtraEstimate(){
+  if(!state.modal) return;
+  const nameEl = document.getElementById('extra-name');
+  const weightEl = document.getElementById('extra-weight');
+  state.modal.name = nameEl ? nameEl.value : "";
+  state.modal.weight = weightEl ? weightEl.value : "";
+  const weightNum = +state.modal.weight;
+  state.modal.estimate = (state.modal.name.trim() && weightNum>0) ? estimateCaloriesForFood(state.modal.name, weightNum) : null;
+  render();
+}
 function submitExtra(name, cal){
   if(!name || !cal) return;
   const lower = name.toLowerCase();
@@ -1157,9 +1440,9 @@ function renderInsightBanner(){
 function applyRevisedPlan(){
   // bias toward higher-protein snack + slightly larger breakfast allocation
   const snackPool = MEAL_DB.snack.filter(m=>m.diet.includes(state.profile.dietPref) && m.p>=12);
-  if(snackPool.length) state.plan.meals.snack = {...snackPool[0]};
+  if(snackPool.length) state.plan.meals.snack = scaleMealToTarget(snackPool[0], state.plan.calories*0.15);
   const bfPool = MEAL_DB.breakfast.filter(m=>m.diet.includes(state.profile.dietPref) && m.p>=25);
-  if(bfPool.length) state.plan.meals.breakfast = {...bfPool[0]};
+  if(bfPool.length) state.plan.meals.breakfast = scaleMealToTarget(bfPool[0], state.plan.calories*0.25);
   state.insightShown = true;
   render();
 }
@@ -1206,7 +1489,7 @@ function renderWorkoutTab(){
         <h3 style="font-size:15px;margin:14px 0 4px;">${d.day}</h3>
         ${d.ex.map(([name,scheme])=>`
           <div class="ledger-row">
-            <div class="ledger-name">${name}</div>
+            <div class="ledger-name">${effectiveExerciseName(name)}</div>
             <div class="ledger-meta">${scheme}</div>
           </div>`).join("")}
       `).join("")}
@@ -1244,6 +1527,11 @@ function renderProgressTab(){
       </div>
     </div>
 
+    <div class="card">
+      <div class="card-title">Weight trend</div>
+      ${renderWeightChart()}
+    </div>
+
     <div class="grid-2">
       <div class="card">
         <div class="card-title">Current weight</div>
@@ -1258,6 +1546,11 @@ function renderProgressTab(){
     </div>
 
     <div class="card">
+      <div class="card-title">Activity — last 14 days</div>
+      ${renderActivityStrip()}
+    </div>
+
+    <div class="card">
       <div class="card-title">Weight log</div>
       ${log.slice().reverse().map(e=>`
         <div class="ledger-row">
@@ -1265,6 +1558,96 @@ function renderProgressTab(){
           <div class="ledger-meta">${e.weight} kg</div>
         </div>`).join("")}
       <button class="btn btn-primary" style="margin-top:10px;" onclick="openModal('logWeight')">Log weight / monthly check-in</button>
+    </div>
+  `;
+}
+
+/* ---- weight trend chart (single-series line, amber accent, hover crosshair) ---- */
+let __weightChartPoints = [];
+function renderWeightChart(){
+  const log = state.weightLog;
+  const target = state.profile.targetWeight;
+  const W = 300, H = 130, padL = 8, padR = 8, padT = 18, padB = 10;
+  const plotW = W-padL-padR, plotH = H-padT-padB;
+  const vals = log.map(e=>e.weight).concat([target]);
+  const minV = Math.min(...vals), maxV = Math.max(...vals);
+  const span = (maxV-minV) || 2;
+  const yPad = span*0.2;
+  const yMin = minV-yPad, yMax = maxV+yPad;
+  const xFor = i => log.length===1 ? padL+plotW/2 : padL + (i/(log.length-1))*plotW;
+  const yFor = v => padT + plotH - ((v-yMin)/(yMax-yMin))*plotH;
+
+  __weightChartPoints = log.map((e,i)=>({x:xFor(i), y:yFor(e.weight), day:e.day, weight:e.weight}));
+  const pathD = __weightChartPoints.map((pt,i)=>`${i===0?'M':'L'}${pt.x.toFixed(1)} ${pt.y.toFixed(1)}`).join(" ");
+  const targetY = yFor(target);
+  const last = __weightChartPoints[__weightChartPoints.length-1];
+  const labelAnchor = last.x>W-44 ? "end" : "middle";
+  const labelX = last.x>W-44 ? W-padR : last.x;
+
+  return `
+  <div style="position:relative;">
+    <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-dim);margin-bottom:2px;">
+      <span>${Math.round(yMax)}kg</span>
+      <span>${Math.round(yMin)}kg</span>
+    </div>
+    <svg viewBox="0 0 ${W} ${H}" class="weight-chart-svg" onmousemove="handleWeightChartHover(event,this)" onmouseleave="hideChartTooltip()">
+      <line x1="${padL}" y1="${padT}" x2="${W-padR}" y2="${padT}" stroke="var(--line)" stroke-width="1"/>
+      <line x1="${padL}" y1="${padT+plotH}" x2="${W-padR}" y2="${padT+plotH}" stroke="var(--line)" stroke-width="1"/>
+      <line x1="${padL}" y1="${targetY}" x2="${W-padR}" y2="${targetY}" stroke="var(--text-dim)" stroke-width="1" stroke-dasharray="3,3"/>
+      <text x="${W-padR}" y="${targetY-4}" text-anchor="end" font-size="9" fill="var(--text-dim)" font-family="'IBM Plex Mono',monospace">Goal ${target}kg</text>
+      <path d="${pathD}" fill="none" stroke="var(--amber)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <circle cx="${last.x}" cy="${last.y}" r="4" fill="var(--amber)" stroke="var(--panel)" stroke-width="2"/>
+      <text x="${labelX}" y="${Math.max(10,last.y-10)}" text-anchor="${labelAnchor}" font-size="11" font-weight="600" fill="var(--text)" font-family="'IBM Plex Mono',monospace">${last.weight}kg</text>
+      <line class="chart-crosshair" x1="0" y1="${padT}" x2="0" y2="${padT+plotH}" stroke="var(--text-dim)" stroke-width="1" style="display:none;"/>
+    </svg>
+    <div class="chart-tooltip" style="display:none;"></div>
+  </div>`;
+}
+function handleWeightChartHover(evt, svgEl){
+  if(!__weightChartPoints.length) return;
+  const rect = svgEl.getBoundingClientRect();
+  const vb = svgEl.viewBox.baseVal;
+  const mouseX = (evt.clientX-rect.left) * (vb.width/rect.width);
+  let nearest = __weightChartPoints[0], bestDist = Infinity;
+  __weightChartPoints.forEach(pt=>{ const d = Math.abs(pt.x-mouseX); if(d<bestDist){ bestDist=d; nearest=pt; } });
+  const crosshair = svgEl.querySelector('.chart-crosshair');
+  if(crosshair){
+    crosshair.setAttribute('x1', nearest.x);
+    crosshair.setAttribute('x2', nearest.x);
+    crosshair.style.display = 'block';
+  }
+  const tooltip = svgEl.parentElement.querySelector('.chart-tooltip');
+  if(tooltip){
+    tooltip.style.display = 'block';
+    tooltip.style.left = (nearest.x/vb.width*100) + '%';
+    tooltip.textContent = `Day ${nearest.day} · ${nearest.weight}kg`;
+  }
+}
+function hideChartTooltip(){
+  document.querySelectorAll('.chart-crosshair').forEach(el=>el.style.display='none');
+  document.querySelectorAll('.chart-tooltip').forEach(el=>el.style.display='none');
+}
+
+/* ---- last-14-days activity strip (sequential single-hue intensity) ---- */
+function renderActivityStrip(){
+  const span = 14;
+  const startDay = Math.max(1, state.today-span+1);
+  const cells = [];
+  for(let d=startDay; d<=state.today; d++){
+    const dayLog = state.logs[d];
+    const mealsLogged = !!(dayLog && dayLog.meals && dayLog.meals.length>0);
+    const workoutDone = !!(dayLog && dayLog.workoutDone);
+    const level = (mealsLogged?1:0) + (workoutDone?1:0);
+    cells.push({day:d, level, mealsLogged, workoutDone});
+  }
+  return `
+    <div class="activity-strip">
+      ${cells.map(c=>`<div class="activity-cell level-${c.level}" title="Day ${c.day}: ${c.workoutDone?'workout done':'no workout'}${c.mealsLogged?', meals logged':', no meals logged'}"></div>`).join("")}
+    </div>
+    <div class="activity-key">
+      <span><span class="activity-swatch level-0"></span>Rest day</span>
+      <span><span class="activity-swatch level-1"></span>Partial</span>
+      <span><span class="activity-swatch level-2"></span>Full day</span>
     </div>
   `;
 }
@@ -1337,7 +1720,10 @@ function renderModal(){
     const slot = m.arg;
     const current = state.plan.meals[slot];
     const allergies = state.profile.allergies || [];
-    const alts = MEAL_DB[slot].filter(x=>x.diet.includes(state.profile.dietPref) && x.name!==current.name && (!x.allergens || !x.allergens.some(a=>allergies.includes(a))));
+    const target = state.plan.calories*MEAL_SLOT_SHARE[slot];
+    const alts = MEAL_DB[slot]
+      .filter(x=>x.diet.includes(state.profile.dietPref) && x.name!==current.name && !state.dislikedFoods.includes(x.name) && (!x.allergens || !x.allergens.some(a=>allergies.includes(a))))
+      .map(x=>scaleMealToTarget(x, target));
     inner = `
       <div class="modal-head"><h3>Swap ${slot}</h3><button class="x-btn" onclick="closeModal();render()">✕</button></div>
       <div class="empty-note">Currently: ${current.name} (${current.cal} kcal)</div>
@@ -1350,15 +1736,31 @@ function renderModal(){
               <div class="ledger-sub">${a.cal} kcal · P${a.p}/C${a.c}/F${a.f}</div>
             </div>
           </div>
-          <button class="btn btn-sm btn-primary" onclick="doSwap('${slot}');setTimeout(()=>closeModal(),0)">Choose</button>
+          <button class="btn btn-sm btn-primary" onclick="doSwap('${slot}')">Choose</button>
         </div>`).join("")}
+    `;
+  } else if(m.type==="foodDisliked"){
+    inner = `
+      <div class="modal-head"><h3>👍 Noted</h3><button class="x-btn" onclick="closeModal();render()">✕</button></div>
+      <div class="banner" style="margin:0;"><div class="banner-icon">🙅</div><div><div class="banner-text">Looks like ${m.name} isn't your thing — since you keep swapping it out, we'll stop suggesting it.</div></div></div>
+      <button class="btn btn-primary btn-block" style="margin-top:14px;" onclick="closeModal();render()">Got it</button>
+    `;
+  } else if(m.type==="exerciseSwapNotice"){
+    inner = `
+      <div class="modal-head"><h3>🔁 Swapped an exercise</h3><button class="x-btn" onclick="closeModal();render()">✕</button></div>
+      <div class="banner" style="margin:0;"><div class="banner-icon">💡</div><div><div class="banner-text">We noticed you've been skipping <b>${m.from}</b>, so we swapped it for <b>${m.to}</b> — it works similar muscles and might suit you better.</div></div></div>
+      <button class="btn btn-primary btn-block" style="margin-top:14px;" onclick="closeModal();render()">Got it</button>
     `;
   } else if(m.type==="logExtra"){
     inner = `
       <div class="modal-head"><h3>Log something else</h3><button class="x-btn" onclick="closeModal();render()">✕</button></div>
-      <div class="field"><label>What did you have?</label><input id="extra-name" type="text" placeholder="e.g. bag of chips"></div>
-      <div class="field"><label>Estimated calories</label><input id="extra-cal" type="number" placeholder="e.g. 250"></div>
-      <button class="btn btn-primary btn-block" onclick="submitExtra(document.getElementById('extra-name').value, document.getElementById('extra-cal').value)">Log it</button>
+      <div class="field"><label>What did you have?</label><input id="extra-name" type="text" placeholder="e.g. grilled chicken breast" value="${m.name||''}" oninput="updateExtraEstimate()"></div>
+      <div class="field"><label>Weight (grams)</label><input id="extra-weight" type="number" placeholder="e.g. 150" value="${m.weight||''}" oninput="updateExtraEstimate()"></div>
+      ${m.estimate ? `
+        <div class="empty-note">Estimated: <span class="mono" style="color:var(--amber)">${m.estimate} kcal</span> (auto-estimate — feel free to adjust)</div>
+        <div class="field"><label>Calories</label><input id="extra-cal" type="number" value="${m.estimate}"></div>
+        <button class="btn btn-primary btn-block" onclick="submitExtra(document.getElementById('extra-name').value, document.getElementById('extra-cal').value)">Log it</button>`
+        : `<div class="empty-note">Enter what you ate and its weight, and we'll estimate the calories for you.</div>`}
     `;
   } else if(m.type==="snapPhoto"){
     const nativeCamera = isNativeApp() && !!(window.Capacitor && Capacitor.Plugins && Capacitor.Plugins.Camera);
@@ -1373,11 +1775,29 @@ function renderModal(){
         <button class="btn btn-primary btn-block" onclick="confirmPhotoLog(document.getElementById('photo-cal').value)">Log this meal</button>`
         : `<div class="empty-note">${nativeCamera?"Tap above to take a photo and we'll estimate the calories.":"Upload a photo and we'll estimate the calories for you."}</div>`}
     `;
-  } else if(m.type==="motivation"){
+  } else if(m.type==="workoutFeedback"){
     inner = `
-      <div class="modal-head"><h3>🔥 Nice.</h3><button class="x-btn" onclick="closeModal();render()">✕</button></div>
-      <div class="banner success" style="margin:0;"><div class="banner-icon">✅</div><div><div class="banner-text">${motivationalMessage()}</div></div></div>
-      <button class="btn btn-primary btn-block" style="margin-top:14px;" onclick="closeModal();render()">Keep going</button>
+      <div class="modal-head"><h3>💪 Workout logged</h3><button class="x-btn" onclick="closeModal();render()">✕</button></div>
+      <div class="banner" style="margin:0;"><div class="banner-icon">🙋</div><div><div class="banner-text">How did that workout feel?</div></div></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0;">
+        <button class="btn btn-sm btn-round" onclick="submitWorkoutFeedback('Felt great')">💪 Felt great</button>
+        <button class="btn btn-sm btn-round" onclick="submitWorkoutFeedback('It was okay')">😌 It was okay</button>
+        <button class="btn btn-sm btn-round" onclick="submitWorkoutFeedback('That was tough')">😩 Tough one</button>
+      </div>
+      <div class="field"><input id="workout-feeling-input" type="text" placeholder="Or tell me in your own words..." onkeydown="if(event.key==='Enter'){submitWorkoutFeedback(this.value)}"></div>
+      <button class="btn btn-primary btn-block" onclick="submitWorkoutFeedback(document.getElementById('workout-feeling-input').value)">Send</button>
+    `;
+  } else if(m.type==="workoutFeedbackResult"){
+    const positive = m.mood==="positive";
+    inner = `
+      <div class="modal-head"><h3>${positive?"🔥 Nice.":"❤️ Thanks for sharing"}</h3><button class="x-btn" onclick="closeModal();render()">✕</button></div>
+      <div class="banner ${positive?'success':''}" style="margin:0;">
+        <div class="banner-icon">${positive?"✅":"💛"}</div>
+        <div><div class="banner-text">${positive
+          ? "Great — keep protein intake high today to support muscle building and recovery."
+          : "Sounds like a tough one. A couple of things that can help: staying on top of your water intake today, and making sure you get solid sleep tonight — recovery really depends on it. A high-energy smoothie or some carbs before your next session can help fuel you through it too."}</div></div>
+      </div>
+      <button class="btn btn-primary btn-block" style="margin-top:14px;" onclick="closeModal();render()">${positive?"Keep going":"Got it"}</button>
     `;
   } else if(m.type==="logWeight"){
     inner = `
