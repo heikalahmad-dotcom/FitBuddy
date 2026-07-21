@@ -554,6 +554,9 @@ function loadState(){
       const persist = JSON.parse(raw);
       Object.assign(state, persist);
       if(state.screen==="session") state.screen = "app"; // don't resume mid-session on reload
+      if(state.chat && state.chat.messages){
+        state.chat.messages = state.chat.messages.filter(m=>!m.pending); // drop any interrupted in-flight request
+      }
     }
   }catch(e){ /* corrupt or unavailable storage — start fresh */ }
 }
@@ -1239,7 +1242,10 @@ function renderChatWidget(){
         <button class="x-btn" onclick="toggleChat()" aria-label="Close chat">✕</button>
       </div>
       <div class="chat-messages" id="chat-messages">
-        ${state.chat.messages.map(m=>`<div class="chat-msg ${m.role}">${escapeHtml(m.text)}</div>`).join("")}
+        ${state.chat.messages.map(m=> m.pending
+          ? `<div class="chat-msg bot chat-typing"><span></span><span></span><span></span></div>`
+          : `<div class="chat-msg ${m.role}">${escapeHtml(m.text)}</div>`
+        ).join("")}
       </div>
       <div class="chat-input-row">
         <input id="chat-input" type="text" placeholder="Ask your FitBuddy..." onkeydown="if(event.key==='Enter'){sendChat();}">
@@ -1256,8 +1262,14 @@ function sendChat(){
   state.chat.messages.push({role:"user", text});
   input.value = "";
   const reply = generateBotReply(text);
-  state.chat.messages.push({role:"bot", text:reply});
-  updateChatWidget();
+  if(reply!==null){
+    state.chat.messages.push({role:"bot", text:reply});
+    updateChatWidget();
+  } else {
+    state.chat.messages.push({role:"bot", text:"", pending:true});
+    updateChatWidget();
+    fetchLlmReply(text);
+  }
 }
 
 function generateBotReply(raw){
@@ -1324,7 +1336,50 @@ function generateBotReply(raw){
   if(/tired|hard|give up|can.?t|discourag|struggl|stress/.test(text)){
     return `Tough days happen to everyone. ${motivationalMessage()}`;
   }
-  return `Got it! I can help most with questions about your calories, macros, today's workout, streak, weight trend, or progress toward your goal — or ask what foods/exercises I've learned to adjust for you.`;
+  return null; // no rule matched — hand off to the LLM for open-ended/emotional questions
+}
+
+/* ---- hybrid chat: LLM fallback for anything the rule-based intents don't cover ----
+   Only reached when generateBotReply() returns null. Sends a snapshot of the
+   user's real numbers as context so the model never has to guess/compute them. */
+const CHAT_API_BASE = "https://fit-buddy-smoky.vercel.app";
+function buildChatContext(){
+  if(!state.profile || !state.plan) return {};
+  const plan = state.plan, log = todayLog();
+  const loggedCal = log.meals.reduce((s,m)=>s+m.cal,0);
+  const wlog = state.weightLog;
+  return {
+    name: state.profile.name,
+    goal: state.profile.goal,
+    caloriesToday: loggedCal,
+    calorieTarget: plan.calories,
+    streak: computeStreak(),
+    weightStart: wlog[0].weight,
+    weightCurrent: wlog[wlog.length-1].weight,
+    weightTarget: state.profile.targetWeight,
+    dislikedFoods: state.dislikedFoods,
+    exerciseSwaps: state.exerciseSwaps,
+  };
+}
+function replacePendingBotMessage(text){
+  const idx = state.chat.messages.findIndex(m=>m.pending);
+  if(idx>=0) state.chat.messages[idx] = {role:"bot", text};
+  else state.chat.messages.push({role:"bot", text});
+  updateChatWidget();
+}
+async function fetchLlmReply(userText){
+  try{
+    const res = await fetch(`${CHAT_API_BASE}/api/chat`, {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({message:userText, context:buildChatContext()}),
+    });
+    if(!res.ok) throw new Error("bad response");
+    const data = await res.json();
+    replacePendingBotMessage(data.reply || "Sorry, I didn't quite catch that — could you rephrase?");
+  }catch(e){
+    replacePendingBotMessage(`I'm having trouble connecting right now — but I can still tell you about your calories, streak, weight trend, or today's workout if you ask directly.`);
+  }
 }
 
 /* ---- swap ---- */
