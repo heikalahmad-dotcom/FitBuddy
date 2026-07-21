@@ -74,6 +74,6 @@ module.exports = async (req, res) => {
     const textBlock = response.content.find((b) => b.type === "text");
     res.status(200).json({ reply: textBlock ? textBlock.text : "" });
   } catch (err) {
-    res.status(500).json({ error: "Something went wrong talking to the assistant.", debug: String(err && err.message || err) });
+    res.status(500).json({ error: "Something went wrong talking to the assistant." });
   }
 };
