@@ -74,11 +74,6 @@ module.exports = async (req, res) => {
     const textBlock = response.content.find((b) => b.type === "text");
     res.status(200).json({ reply: textBlock ? textBlock.text : "" });
   } catch (err) {
-    const k = process.env.ANTHROPIC_API_KEY || "";
-    res.status(500).json({
-      error: "Something went wrong talking to the assistant.",
-      debug: String(err && err.message || err),
-      keyPreview: k ? `len=${k.length} "${k.slice(0,8)}...${k.slice(-4)}"` : "EMPTY_OR_UNDEFINED",
-    });
+    res.status(500).json({ error: "Something went wrong talking to the assistant." });
   }
 };
