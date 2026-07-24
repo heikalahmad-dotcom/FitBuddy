@@ -284,8 +284,19 @@ let state = {
 };
 
 function todayLog(){
-  if(!state.logs[state.today]) state.logs[state.today] = {meals:[], workoutDone:false, setsDone:{}};
+  if(!state.logs[state.today]) state.logs[state.today] = {meals:[], workoutDone:false, setsDone:{}, overageNudgeShown:false};
   return state.logs[state.today];
+}
+
+/* shows once per day, the moment logged calories first cross the daily target */
+function maybeCalorieOverageNudge(){
+  const log = todayLog();
+  if(log.overageNudgeShown) return;
+  const loggedCal = log.meals.reduce((s,m)=>s+m.cal,0);
+  if(loggedCal > state.plan.calories){
+    log.overageNudgeShown = true;
+    state.modal = {type:"calorieOverage", loggedCal, target:state.plan.calories};
+  }
 }
 
 /* ============================= HELPERS ============================= */
@@ -1039,6 +1050,7 @@ function toggleMealDone(slot){
     const meal = state.plan.meals[slot];
     log.meals.push({slot, name:meal.name, cal:meal.cal, p:meal.p, c:meal.c, f:meal.f, extra:false, unhealthy:false});
     markActivityToday();
+    maybeCalorieOverageNudge();
   }
   render();
 }
@@ -1490,6 +1502,7 @@ function submitExtra(name, cal){
   log.meals.push({slot:"extra", name, cal:+cal, p:macros.p, c:macros.c, f:macros.f, extra:true, unhealthy});
   markActivityToday();
   closeModal();
+  maybeCalorieOverageNudge();
   render();
 }
 
@@ -1531,6 +1544,7 @@ function confirmPhotoLog(cal){
   log.meals.push({slot:"extra", name:"Photo-logged meal", cal:+cal, p:macros.p, c:macros.c, f:macros.f, extra:true, unhealthy:false});
   markActivityToday();
   closeModal();
+  maybeCalorieOverageNudge();
   render();
 }
 
@@ -1865,6 +1879,15 @@ function renderModal(){
           </div>
           <button class="btn btn-sm btn-primary" onclick="doSwap('${slot}')">Choose</button>
         </div>`).join("")}
+    `;
+  } else if(m.type==="calorieOverage"){
+    inner = `
+      <div class="modal-head"><h3>📊 Over today's target</h3><button class="x-btn" onclick="closeModal();render()">✕</button></div>
+      <div class="banner" style="margin:0;">
+        <div class="banner-icon">⚠️</div>
+        <div class="banner-text">You've logged ${fmt(m.loggedCal)} kcal today — over your ${fmt(m.target)} kcal target. Worth knowing: extra protein doesn't automatically build extra muscle. Any calories beyond what your body actually uses that day — protein included — get stored as fat, same as extra carbs or fat would. If this was a one-off, no big deal — just something to keep in mind tomorrow.</div>
+      </div>
+      <button class="btn btn-primary btn-block" style="margin-top:14px;" onclick="closeModal();render()">Got it</button>
     `;
   } else if(m.type==="foodDisliked"){
     inner = `
