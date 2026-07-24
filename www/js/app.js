@@ -919,6 +919,7 @@ function renderToday(){
 
     <div class="card-title" style="margin:4px 0 10px;">Today's meals</div>
     ${order.map(slot=>renderTodayMealRow(slot, slot===nextSlot)).join("")}
+    ${log.meals.map((m,i)=>({...m,_idx:i})).filter(m=>m.extra).map(m=>renderExtraMealRow(m)).join("")}
     <div style="margin:2px 0 20px;display:flex;gap:8px;flex-wrap:wrap;">
       <button class="btn btn-sm btn-round" onclick="openModal('logExtra')">+ Log something else I ate</button>
       <button class="btn btn-sm btn-round" onclick="openModal('snapPhoto')">📷 Snap a meal photo</button>
@@ -1010,6 +1011,24 @@ function renderTodayMealRow(slot, isNext){
       </div>
       <button class="pill-btn" onclick="event.stopPropagation();openModal('swap','${slot}')">Swap</button>
     </div>`;
+}
+
+function renderExtraMealRow(entry){
+  return `
+    <div class="meal-card">
+      <div class="meal-main">
+        <div class="meal-thumb">${mealPlateSVG(entry)}</div>
+        <div>
+          <div class="meal-name">${entry.name}</div>
+          <div class="meal-sub">Logged extra · ${entry.cal} kcal · P${entry.p||0}/C${entry.c||0}/F${entry.f||0}</div>
+        </div>
+      </div>
+      <button class="pill-btn" onclick="removeExtraMeal(${entry._idx})">Remove</button>
+    </div>`;
+}
+function removeExtraMeal(mealIdx){
+  todayLog().meals.splice(mealIdx, 1);
+  render();
 }
 
 function toggleMealDone(slot){
