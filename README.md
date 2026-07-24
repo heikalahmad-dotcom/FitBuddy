@@ -147,6 +147,21 @@ pick a simulator/emulator or a plugged-in device and hit Run.
   when running as the packaged native app (see `takeMealPhoto` in
   `app.js`), instead of the system file picker. In a plain browser it still
   falls back to the file input for local dev/testing.
+- **Voice in the chat assistant.** A 🔊/🔇 toggle in the chat header reads
+  bot replies aloud in British English (`speakText` in `app.js`, via the
+  browser's built-in `speechSynthesis` — picks an `en-GB` voice when one is
+  installed, otherwise falls back to any available English voice). A 🎤
+  button next to the chat input lets you speak instead of type, using the
+  browser's `SpeechRecognition` API (`startVoiceInput`). **Known platform
+  gap:** speech *input* works in Chrome and in the Android app (Chromium
+  WebView), but Apple's iOS WKWebView doesn't implement `SpeechRecognition`
+  at all — the mic button is simply hidden there. Voice *output* (spoken
+  replies) works everywhere, including iOS, since `speechSynthesis` is
+  broadly supported. Getting mic input working on iOS too would need a
+  native Capacitor plugin (e.g. `@capacitor-community/speech-recognition`)
+  with its own `NSSpeechRecognitionUsageDescription` /
+  `NSMicrophoneUsageDescription` Info.plist entries — similar effort to the
+  camera permission setup above.
 
 ## Recommended next steps (not yet implemented)
 

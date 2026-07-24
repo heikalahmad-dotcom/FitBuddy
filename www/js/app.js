@@ -276,6 +276,7 @@ let state = {
   modal: null, // {type,...}
   chat: {
     open: false,
+    voiceOutput: false, // read bot replies aloud (British English voice) when enabled
     messages: [
       {role:"bot", text:"Hey! I'm your FitBuddy 👋 Ask me about today's calories, your workout, streak, or progress toward your goal."}
     ]
@@ -1300,6 +1301,54 @@ function toggleChat(){
   state.chat.open = !state.chat.open;
   updateChatWidget();
 }
+function toggleVoiceOutput(){
+  state.chat.voiceOutput = !state.chat.voiceOutput;
+  if(!state.chat.voiceOutput && window.speechSynthesis) speechSynthesis.cancel();
+  updateChatWidget();
+}
+
+/* ---- voice: spoken bot replies (British English) ---- */
+function getEnglishVoice(){
+  if(!window.speechSynthesis) return null;
+  const voices = speechSynthesis.getVoices();
+  if(!voices.length) return null;
+  return voices.find(v=>v.lang==="en-GB") || voices.find(v=>v.lang && v.lang.startsWith("en")) || voices[0];
+}
+function speakText(text){
+  if(!state.chat.voiceOutput || !window.speechSynthesis || !text) return;
+  const doSpeak = ()=>{
+    speechSynthesis.cancel();
+    const utter = new SpeechSynthesisUtterance(text);
+    utter.lang = "en-GB";
+    const voice = getEnglishVoice();
+    if(voice) utter.voice = voice;
+    speechSynthesis.speak(utter);
+  };
+  if(speechSynthesis.getVoices().length) doSpeak();
+  else speechSynthesis.onvoiceschanged = doSpeak;
+}
+
+/* ---- voice: speech-to-text input (Chrome/Android; unsupported on iOS WebView) ---- */
+function startVoiceInput(){
+  const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if(!SpeechRecognitionCtor) return;
+  const micBtn = document.getElementById("chat-mic-btn");
+  const recognition = new SpeechRecognitionCtor();
+  recognition.lang = "en-GB";
+  recognition.interimResults = false;
+  recognition.maxAlternatives = 1;
+  if(micBtn) micBtn.classList.add("listening");
+  const stopListening = ()=>{ if(micBtn) micBtn.classList.remove("listening"); };
+  recognition.onresult = (e)=>{
+    const transcript = e.results[0][0].transcript;
+    const input = document.getElementById("chat-input");
+    if(input) input.value = transcript;
+    sendChat();
+  };
+  recognition.onerror = stopListening;
+  recognition.onend = stopListening;
+  recognition.start();
+}
 
 function updateChatWidget(){
   const el = document.getElementById("chat-widget-slot");
@@ -1317,11 +1366,15 @@ function renderChatWidget(){
   if(!state.chat.open){
     return `<button id="chat-widget-slot" class="chat-fab" onclick="toggleChat()" aria-label="Speak to your FitBuddy">💬</button>`;
   }
+  const hasSpeechInput = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
   return `
     <div id="chat-widget-slot" class="chat-panel">
       <div class="chat-head">
         <div class="chat-head-title">💬 Speak to your FitBuddy</div>
-        <button class="x-btn" onclick="toggleChat()" aria-label="Close chat">✕</button>
+        <div style="display:flex;align-items:center;gap:4px;">
+          <button class="x-btn" onclick="toggleVoiceOutput()" aria-label="${state.chat.voiceOutput?'Mute spoken replies':'Read replies aloud'}" title="${state.chat.voiceOutput?'Voice replies on':'Voice replies off'}">${state.chat.voiceOutput?'🔊':'🔇'}</button>
+          <button class="x-btn" onclick="toggleChat()" aria-label="Close chat">✕</button>
+        </div>
       </div>
       <div class="chat-messages" id="chat-messages">
         ${state.chat.messages.map(m=> m.pending
@@ -1331,6 +1384,7 @@ function renderChatWidget(){
       </div>
       <div class="chat-input-row">
         <input id="chat-input" type="text" placeholder="Ask your FitBuddy..." onkeydown="if(event.key==='Enter'){sendChat();}">
+        ${hasSpeechInput ? `<button id="chat-mic-btn" class="chat-mic" onclick="startVoiceInput()" aria-label="Speak">🎤</button>` : ""}
         <button class="chat-send" onclick="sendChat()" aria-label="Send">➤</button>
       </div>
     </div>`;
@@ -1347,6 +1401,7 @@ function sendChat(){
   if(reply!==null){
     state.chat.messages.push({role:"bot", text:reply});
     updateChatWidget();
+    speakText(reply);
   } else {
     state.chat.messages.push({role:"bot", text:"", pending:true});
     updateChatWidget();
@@ -1448,6 +1503,7 @@ function replacePendingBotMessage(text){
   if(idx>=0) state.chat.messages[idx] = {role:"bot", text};
   else state.chat.messages.push({role:"bot", text});
   updateChatWidget();
+  speakText(text);
 }
 async function fetchLlmReply(userText){
   try{

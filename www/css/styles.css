@@ -378,6 +378,12 @@
     background:var(--amber);border:none;color:#1a0d05;width:36px;height:36px;
     border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:14px;
   }
+  .chat-mic{
+    background:var(--panel-2);border:1px solid var(--line);color:var(--text);width:36px;height:36px;
+    border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:14px;
+  }
+  .chat-mic.listening{background:var(--amber);color:#1a0d05;border-color:var(--amber);animation:chat-mic-pulse 1s infinite;}
+  @keyframes chat-mic-pulse{0%,100%{box-shadow:0 0 0 0 var(--amber-dim);}50%{box-shadow:0 0 0 6px var(--amber-dim);}}
   @media(max-width:640px){
     .chat-fab{bottom:80px;}
     .chat-panel{bottom:80px;right:12px;width:calc(100vw - 24px);}
