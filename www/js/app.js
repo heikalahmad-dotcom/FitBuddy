@@ -39,37 +39,55 @@ const MEAL_SLOT_SHARE = {breakfast:0.25, lunch:0.3, dinner:0.3, snack:0.15};
 /* rough calorie density (kcal per 100g) by food keyword, most calorie-dense/
    specific first — used to read a free-text food entry + its weight and
    estimate calories without the user having to know/guess the number */
+/* macroRatio = rough share of calories from protein/carbs/fat for that food
+   category (fractions of total kcal, not grams) — used to back out estimated
+   macro grams for free-text/photo-logged food, same rough-estimate spirit as
+   the calorie density itself. */
 const FOOD_CALORIE_DENSITY = [
-  {match:/butter|\boil\b|mayo/, calPer100g:720},
-  {match:/nuts?|almond|peanut|cashew|walnut/, calPer100g:580},
-  {match:/chips|fries|crisps/, calPer100g:540},
-  {match:/chocolate|candy|cookie|donut|doughnut|cake|pastry/, calPer100g:480},
-  {match:/bacon|sausage|salami|pepperoni/, calPer100g:420},
-  {match:/cheese/, calPer100g:400},
-  {match:/burger|steak|red meat|beef/, calPer100g:250},
-  {match:/pizza/, calPer100g:270},
-  {match:/bread|bagel|toast|bun\b|roll/, calPer100g:270},
-  {match:/ice cream/, calPer100g:210},
-  {match:/avocado/, calPer100g:160},
-  {match:/chicken|turkey|poultry/, calPer100g:165},
-  {match:/egg/, calPer100g:155},
-  {match:/fish|salmon|tuna|shrimp|seafood/, calPer100g:150},
-  {match:/rice|pasta|noodle|quinoa/, calPer100g:150},
-  {match:/wine/, calPer100g:83},
-  {match:/beer/, calPer100g:43},
-  {match:/soda|cola|juice|energy drink/, calPer100g:42},
-  {match:/yogurt|yoghurt/, calPer100g:100},
-  {match:/milk/, calPer100g:60},
-  {match:/banana|apple|pear|orange|fruit/, calPer100g:60},
-  {match:/berry|berries|strawberr|blueberr/, calPer100g:45},
-  {match:/salad|lettuce|spinach|greens|vegetable|veggie|broccoli/, calPer100g:35},
+  {match:/butter|\boil\b|mayo/, calPer100g:720, macroRatio:{p:0,c:0,f:1}},
+  {match:/nuts?|almond|peanut|cashew|walnut/, calPer100g:580, macroRatio:{p:.13,c:.15,f:.72}},
+  {match:/chips|fries|crisps/, calPer100g:540, macroRatio:{p:.05,c:.45,f:.50}},
+  {match:/chocolate|candy|cookie|donut|doughnut|cake|pastry/, calPer100g:480, macroRatio:{p:.05,c:.55,f:.40}},
+  {match:/bacon|sausage|salami|pepperoni/, calPer100g:420, macroRatio:{p:.30,c:.02,f:.68}},
+  {match:/cheese/, calPer100g:400, macroRatio:{p:.25,c:.02,f:.73}},
+  {match:/burger|steak|red meat|beef/, calPer100g:250, macroRatio:{p:.35,c:.05,f:.60}},
+  {match:/pizza/, calPer100g:270, macroRatio:{p:.15,c:.40,f:.45}},
+  {match:/bread|bagel|toast|bun\b|roll/, calPer100g:270, macroRatio:{p:.13,c:.75,f:.12}},
+  {match:/ice cream/, calPer100g:210, macroRatio:{p:.07,c:.50,f:.43}},
+  {match:/avocado/, calPer100g:160, macroRatio:{p:.05,c:.20,f:.75}},
+  {match:/chicken|turkey|poultry/, calPer100g:165, macroRatio:{p:.75,c:0,f:.25}},
+  {match:/egg/, calPer100g:155, macroRatio:{p:.35,c:.03,f:.62}},
+  {match:/fish|salmon|tuna|shrimp|seafood/, calPer100g:150, macroRatio:{p:.60,c:0,f:.40}},
+  {match:/rice|pasta|noodle|quinoa/, calPer100g:150, macroRatio:{p:.10,c:.85,f:.05}},
+  {match:/wine/, calPer100g:83, macroRatio:{p:0,c:1,f:0}},
+  {match:/beer/, calPer100g:43, macroRatio:{p:.05,c:.95,f:0}},
+  {match:/soda|cola|juice|energy drink/, calPer100g:42, macroRatio:{p:0,c:1,f:0}},
+  {match:/yogurt|yoghurt/, calPer100g:100, macroRatio:{p:.30,c:.45,f:.25}},
+  {match:/milk/, calPer100g:60, macroRatio:{p:.20,c:.50,f:.30}},
+  {match:/banana|apple|pear|orange|fruit/, calPer100g:60, macroRatio:{p:.05,c:.90,f:.05}},
+  {match:/berry|berries|strawberr|blueberr/, calPer100g:45, macroRatio:{p:.07,c:.85,f:.08}},
+  {match:/salad|lettuce|spinach|greens|vegetable|veggie|broccoli/, calPer100g:35, macroRatio:{p:.20,c:.65,f:.15}},
 ];
 const DEFAULT_CAL_PER_100G = 180; // reasonable fallback for unrecognized mixed foods
-function estimateCaloriesForFood(name, weightGrams){
+const DEFAULT_MACRO_RATIO = {p:.20,c:.50,f:.30};
+function findFoodDensityEntry(name){
   const lower = (name||"").toLowerCase();
-  const hit = FOOD_CALORIE_DENSITY.find(f=>f.match.test(lower));
+  return FOOD_CALORIE_DENSITY.find(f=>f.match.test(lower)) || null;
+}
+function estimateCaloriesForFood(name, weightGrams){
+  const hit = findFoodDensityEntry(name);
   const density = hit ? hit.calPer100g : DEFAULT_CAL_PER_100G;
   return Math.round(density * (+weightGrams||0) / 100);
+}
+function estimateMacrosForCalories(name, cal){
+  const hit = findFoodDensityEntry(name);
+  const ratio = hit ? hit.macroRatio : DEFAULT_MACRO_RATIO;
+  cal = +cal || 0;
+  return {
+    p: Math.round(cal*ratio.p/4),
+    c: Math.round(cal*ratio.c/4),
+    f: Math.round(cal*ratio.f/9),
+  };
 }
 
 const WORKOUT_DIFFICULTY_KEYWORDS = ["hard","tough","difficult","tired","exhausted","rough","struggle","weak","sore","hurt","drained","dead","awful","terrible","brutal","bad","couldn't","hate","rest"];
@@ -855,6 +873,9 @@ function renderToday(){
   const log = todayLog();
   const plan = state.plan;
   const loggedCal = log.meals.reduce((s,m)=>s+m.cal,0);
+  const loggedP = log.meals.reduce((s,m)=>s+(m.p||0),0);
+  const loggedC = log.meals.reduce((s,m)=>s+(m.c||0),0);
+  const loggedF = log.meals.reduce((s,m)=>s+(m.f||0),0);
 
   const insight = maybeInsight();
 
@@ -884,6 +905,15 @@ function renderToday(){
         <div class="card-title">Day</div>
         <div class="stat-num">#${state.today}</div>
         <div class="stat-label">${plan.weeksToGoal} wk estimate to goal</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Macros today</div>
+      <div class="macro-ring-row">
+        ${renderMiniMacroRing("Protein", loggedP, plan.protein)}
+        ${renderMiniMacroRing("Carbs", loggedC, plan.carbs)}
+        ${renderMiniMacroRing("Fat", loggedF, plan.fat)}
       </div>
     </div>
 
@@ -937,6 +967,27 @@ function renderCalorieRing(loggedCal, targetCal){
     </div></div>`;
 }
 
+function renderMiniMacroRing(label, loggedG, targetG){
+  const pct = targetG>0 ? Math.min(100, Math.round((loggedG/targetG)*100)) : 0;
+  const r=28, c=2*Math.PI*r;
+  const offset = c - (pct/100)*c;
+  return `
+    <div class="macro-ring">
+      <div class="ring-wrap"><div class="ring-center sm">
+        <svg width="68" height="68" viewBox="0 0 68 68">
+          <circle cx="34" cy="34" r="${r}" fill="none" stroke="var(--panel-2)" stroke-width="6"/>
+          <circle cx="34" cy="34" r="${r}" fill="none" stroke="var(--amber)" stroke-width="6" stroke-linecap="round"
+            stroke-dasharray="${c}" stroke-dashoffset="${offset}" style="transition:stroke-dashoffset .4s;"/>
+        </svg>
+        <div class="ring-label sm">
+          <div class="num">${Math.round(loggedG)}</div>
+          <div class="sub">/${Math.round(targetG)}g</div>
+        </div>
+      </div></div>
+      <div class="macro-ring-name">${label}</div>
+    </div>`;
+}
+
 function isExerciseDone(idx){
   const sets = todayLog().setsDone && todayLog().setsDone[idx];
   return !!(sets && sets.length && sets.every(Boolean));
@@ -967,7 +1018,7 @@ function toggleMealDone(slot){
   if(idx>=0){ log.meals.splice(idx,1); }
   else {
     const meal = state.plan.meals[slot];
-    log.meals.push({slot, name:meal.name, cal:meal.cal, extra:false, unhealthy:false});
+    log.meals.push({slot, name:meal.name, cal:meal.cal, p:meal.p, c:meal.c, f:meal.f, extra:false, unhealthy:false});
     markActivityToday();
   }
   render();
@@ -1415,8 +1466,9 @@ function submitExtra(name, cal){
   if(!name || !cal) return;
   const lower = name.toLowerCase();
   const unhealthy = UNHEALTHY_KEYWORDS.some(k=>lower.includes(k));
+  const macros = estimateMacrosForCalories(name, cal);
   const log = todayLog();
-  log.meals.push({slot:"extra", name, cal:+cal, extra:true, unhealthy});
+  log.meals.push({slot:"extra", name, cal:+cal, p:macros.p, c:macros.c, f:macros.f, extra:true, unhealthy});
   markActivityToday();
   closeModal();
   render();
@@ -1455,8 +1507,9 @@ async function takeMealPhoto(){
   }catch(e){ /* user cancelled the camera — no-op */ }
 }
 function confirmPhotoLog(cal){
+  const macros = estimateMacrosForCalories("Photo-logged meal", cal);
   const log = todayLog();
-  log.meals.push({slot:"extra", name:"Photo-logged meal", cal:+cal, extra:true, unhealthy:false});
+  log.meals.push({slot:"extra", name:"Photo-logged meal", cal:+cal, p:macros.p, c:macros.c, f:macros.f, extra:true, unhealthy:false});
   markActivityToday();
   closeModal();
   render();
