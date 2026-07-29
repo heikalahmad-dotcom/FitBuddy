@@ -73,6 +73,29 @@ Android needs no manual step — `@capacitor/camera` declares the `CAMERA`
 permission in its own manifest, which `npx cap sync` merges into your app's
 manifest automatically, and the runtime permission prompt fires on its own.
 
+## Required: microphone/speech permission (iOS only, one-time)
+
+The 🎤 "speak instead of type" button in the chat assistant uses
+[`@capacitor-community/speech-recognition`](https://github.com/capacitor-community/speech-recognition)
+for native speech-to-text on iOS/Android (see `startVoiceInputNative` in
+`app.js`). Same iOS rule as the camera: missing the usage-description keys
+crashes the app instead of just denying permission.
+
+Right after `npx cap add ios`, open `ios/App/App/Info.plist` and add:
+
+```xml
+<key>NSSpeechRecognitionUsageDescription</key>
+<string>FitBuddy uses speech recognition so you can talk to your FitBuddy instead of typing.</string>
+<key>NSMicrophoneUsageDescription</key>
+<string>FitBuddy uses the microphone to hear you when you speak to your FitBuddy.</string>
+```
+
+Android needs no manual step — the plugin's own manifest declares
+`RECORD_AUDIO`, merged automatically by `npx cap sync`. In a plain browser
+(no native runtime), this falls back to the Web `SpeechRecognition` API,
+which works in Chrome but has no Safari/iOS-WebView equivalent — that's why
+the native plugin above is what actually gets voice input working on iOS.
+
 ## Required: Anthropic API key (for the chat assistant's LLM fallback)
 
 The chat assistant is **hybrid**: fast, free, offline-capable rule-based
@@ -151,17 +174,15 @@ pick a simulator/emulator or a plugged-in device and hit Run.
   bot replies aloud in British English (`speakText` in `app.js`, via the
   browser's built-in `speechSynthesis` — picks an `en-GB` voice when one is
   installed, otherwise falls back to any available English voice). A 🎤
-  button next to the chat input lets you speak instead of type, using the
-  browser's `SpeechRecognition` API (`startVoiceInput`). **Known platform
-  gap:** speech *input* works in Chrome and in the Android app (Chromium
-  WebView), but Apple's iOS WKWebView doesn't implement `SpeechRecognition`
-  at all — the mic button is simply hidden there. Voice *output* (spoken
-  replies) works everywhere, including iOS, since `speechSynthesis` is
-  broadly supported. Getting mic input working on iOS too would need a
-  native Capacitor plugin (e.g. `@capacitor-community/speech-recognition`)
-  with its own `NSSpeechRecognitionUsageDescription` /
-  `NSMicrophoneUsageDescription` Info.plist entries — similar effort to the
-  camera permission setup above.
+  button next to the chat input lets you speak instead of type. On the
+  packaged native app (iOS/Android) this uses
+  [`@capacitor-community/speech-recognition`](https://github.com/capacitor-community/speech-recognition)
+  for real on-device speech-to-text (`startVoiceInputNative` in `app.js`) —
+  see "Required: microphone/speech permission" above for the one-time iOS
+  setup step. In a plain browser (no native runtime) it falls back to the
+  Web `SpeechRecognition` API instead, which works in Chrome but has no
+  Safari equivalent — the mic button is hidden there, same as it always was
+  for plain-browser testing.
 
 ## Recommended next steps (not yet implemented)
 

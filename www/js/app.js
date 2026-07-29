@@ -1329,7 +1329,11 @@ function speakText(text){
 }
 
 /* ---- voice: speech-to-text input (Chrome/Android; unsupported on iOS WebView) ---- */
+function hasNativeSpeechInput(){
+  return isNativeApp() && !!(window.Capacitor && Capacitor.Plugins && Capacitor.Plugins.SpeechRecognition);
+}
 function startVoiceInput(){
+  if(hasNativeSpeechInput()){ startVoiceInputNative(); return; }
   const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
   if(!SpeechRecognitionCtor) return;
   const micBtn = document.getElementById("chat-mic-btn");
@@ -1349,6 +1353,30 @@ function startVoiceInput(){
   recognition.onend = stopListening;
   recognition.start();
 }
+/* native speech-to-text via @capacitor-community/speech-recognition (iOS/Android) */
+async function startVoiceInputNative(){
+  const SR = Capacitor.Plugins.SpeechRecognition;
+  const micBtn = document.getElementById("chat-mic-btn");
+  try{
+    const {available} = await SR.available();
+    if(!available) return;
+    let perm = await SR.checkPermissions();
+    if(perm.speechRecognition!=="granted"){
+      perm = await SR.requestPermissions();
+      if(perm.speechRecognition!=="granted") return;
+    }
+    if(micBtn) micBtn.classList.add("listening");
+    const result = await SR.start({language:"en-GB", maxResults:1, partialResults:false, popup:false});
+    if(result && result.matches && result.matches.length){
+      const input = document.getElementById("chat-input");
+      if(input) input.value = result.matches[0];
+      sendChat();
+    }
+  }catch(e){ /* permission denied or recognition error — no-op */
+  }finally{
+    if(micBtn) micBtn.classList.remove("listening");
+  }
+}
 
 function updateChatWidget(){
   const el = document.getElementById("chat-widget-slot");
@@ -1366,7 +1394,7 @@ function renderChatWidget(){
   if(!state.chat.open){
     return `<button id="chat-widget-slot" class="chat-fab" onclick="toggleChat()" aria-label="Speak to your FitBuddy">💬</button>`;
   }
-  const hasSpeechInput = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+  const hasSpeechInput = hasNativeSpeechInput() || !!(window.SpeechRecognition || window.webkitSpeechRecognition);
   return `
     <div id="chat-widget-slot" class="chat-panel">
       <div class="chat-head">
