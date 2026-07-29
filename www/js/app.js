@@ -277,6 +277,7 @@ let state = {
   chat: {
     open: false,
     voiceOutput: false, // read bot replies aloud (British English voice) when enabled
+    voiceConversation: false, // hands-free mode: mic auto-restarts after every reply until chat closes
     messages: [
       {role:"bot", text:"Hey! I'm your FitBuddy 👋 Ask me about today's calories, your workout, streak, or progress toward your goal."}
     ]
@@ -577,6 +578,7 @@ function loadState(){
       if(state.chat && state.chat.messages){
         state.chat.messages = state.chat.messages.filter(m=>!m.pending); // drop any interrupted in-flight request
       }
+      if(state.chat) state.chat.voiceConversation = false; // never auto-start listening on a fresh page load
     }
   }catch(e){ /* corrupt or unavailable storage — start fresh */ }
 }
@@ -1287,9 +1289,30 @@ function escapeHtml(str){
   return str.replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+/* bumped on every open/close so a stale setTimeout from a previous session
+   (e.g. a quick close+reopen) can tell it's no longer current and no-op,
+   even though state.chat.open/voiceConversation look true again by then */
+let voiceSessionId = 0;
 function toggleChat(){
   state.chat.open = !state.chat.open;
-  updateChatWidget();
+  voiceSessionId++;
+  if(state.chat.open){
+    state.chat.voiceConversation = true;
+    updateChatWidget();
+    const mySession = voiceSessionId;
+    setTimeout(()=>{ if(state.chat.open && voiceSessionId===mySession) startVoiceInput(); }, 300);
+  } else {
+    state.chat.voiceConversation = false;
+    stopVoiceInput();
+    if(window.speechSynthesis) speechSynthesis.cancel();
+    updateChatWidget();
+  }
+}
+/* re-opens the mic after a reply, while hands-free mode is still active */
+function continueVoiceConversation(){
+  if(!state.chat.open || !state.chat.voiceConversation) return;
+  const mySession = voiceSessionId;
+  setTimeout(()=>{ if(state.chat.open && state.chat.voiceConversation && voiceSessionId===mySession) startVoiceInput(); }, 300);
 }
 function toggleVoiceOutput(){
   state.chat.voiceOutput = !state.chat.voiceOutput;
@@ -1304,14 +1327,17 @@ function getEnglishVoice(){
   if(!voices.length) return null;
   return voices.find(v=>v.lang==="en-GB") || voices.find(v=>v.lang && v.lang.startsWith("en")) || voices[0];
 }
-function speakText(text){
-  if(!state.chat.voiceOutput || !window.speechSynthesis || !text) return;
+function speakText(text, onDone){
+  const finish = ()=>{ if(onDone) onDone(); };
+  if(!state.chat.voiceOutput || !window.speechSynthesis || !text){ finish(); return; }
   const doSpeak = ()=>{
     speechSynthesis.cancel();
     const utter = new SpeechSynthesisUtterance(text);
     utter.lang = "en-GB";
     const voice = getEnglishVoice();
     if(voice) utter.voice = voice;
+    utter.onend = finish;
+    utter.onerror = finish;
     speechSynthesis.speak(utter);
   };
   if(speechSynthesis.getVoices().length) doSpeak();
@@ -1322,17 +1348,37 @@ function speakText(text){
 function hasNativeSpeechInput(){
   return isNativeApp() && !!(window.Capacitor && Capacitor.Plugins && Capacitor.Plugins.SpeechRecognition);
 }
+let __activeRecognition = null;
+let __voiceInputActive = false;
+function stopVoiceInput(){
+  __voiceInputActive = false;
+  if(hasNativeSpeechInput()){
+    try{ Capacitor.Plugins.SpeechRecognition.stop(); }catch(e){ /* nothing to stop */ }
+  } else if(__activeRecognition){
+    try{ __activeRecognition.stop(); }catch(e){ /* already stopped */ }
+    __activeRecognition = null;
+  }
+  const micBtn = document.getElementById("chat-mic-btn");
+  if(micBtn) micBtn.classList.remove("listening");
+}
 function startVoiceInput(){
+  if(__voiceInputActive) return; // a session is already listening/in-flight — never stack a second one
   if(hasNativeSpeechInput()){ startVoiceInputNative(); return; }
   const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
   if(!SpeechRecognitionCtor) return;
+  __voiceInputActive = true;
   const micBtn = document.getElementById("chat-mic-btn");
   const recognition = new SpeechRecognitionCtor();
+  __activeRecognition = recognition;
   recognition.lang = "en-GB";
   recognition.interimResults = false;
   recognition.maxAlternatives = 1;
   if(micBtn) micBtn.classList.add("listening");
-  const stopListening = ()=>{ if(micBtn) micBtn.classList.remove("listening"); };
+  const stopListening = ()=>{
+    __voiceInputActive = false;
+    if(micBtn) micBtn.classList.remove("listening");
+    if(__activeRecognition===recognition) __activeRecognition = null;
+  };
   recognition.onresult = (e)=>{
     const transcript = e.results[0][0].transcript;
     const input = document.getElementById("chat-input");
@@ -1345,6 +1391,7 @@ function startVoiceInput(){
 }
 /* native speech-to-text via @capacitor-community/speech-recognition (iOS/Android) */
 async function startVoiceInputNative(){
+  __voiceInputActive = true;
   const SR = Capacitor.Plugins.SpeechRecognition;
   const micBtn = document.getElementById("chat-mic-btn");
   try{
@@ -1364,6 +1411,7 @@ async function startVoiceInputNative(){
     }
   }catch(e){ /* permission denied or recognition error — no-op */
   }finally{
+    __voiceInputActive = false;
     if(micBtn) micBtn.classList.remove("listening");
   }
 }
@@ -1419,7 +1467,7 @@ function sendChat(){
     const reply = "Once you finish setting up your plan, I'll be able to answer questions about your calories, workouts, and progress. Excited to get started? 💪";
     state.chat.messages.push({role:"bot", text:reply});
     updateChatWidget();
-    speakText(reply);
+    speakText(reply, continueVoiceConversation);
     return;
   }
   state.chat.messages.push({role:"bot", text:"", pending:true});
@@ -1453,7 +1501,7 @@ function replacePendingBotMessage(text){
   if(idx>=0) state.chat.messages[idx] = {role:"bot", text};
   else state.chat.messages.push({role:"bot", text});
   updateChatWidget();
-  speakText(text);
+  speakText(text, continueVoiceConversation);
 }
 async function fetchLlmReply(userText){
   try{

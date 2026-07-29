@@ -170,12 +170,17 @@ pick a simulator/emulator or a plugged-in device and hit Run.
   when running as the packaged native app (see `takeMealPhoto` in
   `app.js`), instead of the system file picker. In a plain browser it still
   falls back to the file input for local dev/testing.
-- **Voice in the chat assistant.** A 🔊/🔇 toggle in the chat header reads
-  bot replies aloud in British English (`speakText` in `app.js`, via the
-  browser's built-in `speechSynthesis` — picks an `en-GB` voice when one is
-  installed, otherwise falls back to any available English voice). A 🎤
-  button next to the chat input lets you speak instead of type. On the
-  packaged native app (iOS/Android) this uses
+- **Voice in the chat assistant, hands-free.** Opening the chat (tapping 💬)
+  automatically starts listening — no need to tap the mic or say a wake
+  phrase first. After each reply, it automatically starts listening again
+  (`continueVoiceConversation` in `app.js`), so a whole conversation can
+  happen hands-free; it only stops when you close the chat (✕). A 🔊/🔇
+  toggle in the chat header reads bot replies aloud in British English
+  (`speakText`, via the browser's built-in `speechSynthesis` — picks an
+  `en-GB` voice when one is installed, otherwise falls back to any available
+  English voice); when it's on, the mic waits for the reply to finish
+  speaking before it starts listening again, so it doesn't hear itself. On
+  the packaged native app (iOS/Android) this uses
   [`@capacitor-community/speech-recognition`](https://github.com/capacitor-community/speech-recognition)
   for real on-device speech-to-text (`startVoiceInputNative` in `app.js`) —
   see "Required: microphone/speech permission" above for the one-time iOS
@@ -183,6 +188,12 @@ pick a simulator/emulator or a plugged-in device and hit Run.
   Web `SpeechRecognition` API instead, which works in Chrome but has no
   Safari equivalent — the mic button is hidden there, same as it always was
   for plain-browser testing.
+  - There's no true "always listening in the background" wake-word
+    detection (e.g. saying "Hey FitBuddy" while the app is closed or the
+    chat panel isn't open) — that needs a continuous, always-on audio
+    pipeline that neither the Web Speech API nor the native plugin support,
+    and would realistically require a dedicated wake-word SDK (e.g. Picovoice
+    Porcupine). Hands-free only applies once the chat panel is open.
 
 ## Recommended next steps (not yet implemented)
 
