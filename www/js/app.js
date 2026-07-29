@@ -538,16 +538,6 @@ function mealPlateSVG(meal){
   return MEAL_ICON_LIBRARY[meal.name] || genericPlateSVG(meal);
 }
 
-function motivationalMessage(){
-  const msgs = [
-    "Nice work — that's a full day locked in. Keep the streak alive.",
-    "Right on target. This is exactly how goals get hit.",
-    "You showed up today. That's the whole game.",
-    "Solid session logged — future-you says thanks.",
-    "Consistency beats intensity. You're stacking the right days.",
-  ];
-  return msgs[Math.floor(Math.random()*msgs.length)];
-}
 
 /* ============================= PERSISTENCE ============================= */
 /* Now that FitBuddy runs as a real packaged app (not a claude.ai chat preview),
@@ -1425,88 +1415,20 @@ function sendChat(){
   if(!text) return;
   state.chat.messages.push({role:"user", text});
   input.value = "";
-  const reply = generateBotReply(text);
-  if(reply!==null){
+  if(!state.profile || !state.plan){
+    const reply = "Once you finish setting up your plan, I'll be able to answer questions about your calories, workouts, and progress. Excited to get started? 💪";
     state.chat.messages.push({role:"bot", text:reply});
     updateChatWidget();
     speakText(reply);
-  } else {
-    state.chat.messages.push({role:"bot", text:"", pending:true});
-    updateChatWidget();
-    fetchLlmReply(text);
+    return;
   }
+  state.chat.messages.push({role:"bot", text:"", pending:true});
+  updateChatWidget();
+  fetchLlmReply(text);
 }
 
-function generateBotReply(raw){
-  const text = raw.toLowerCase();
-  if(!state.profile || !state.plan){
-    return "Once you finish setting up your plan, I'll be able to answer questions about your calories, workouts, and progress. Excited to get started? 💪";
-  }
-  const plan = state.plan;
-  const log = todayLog();
-  const loggedCal = log.meals.reduce((s,m)=>s+m.cal,0);
-  const remaining = Math.max(0, plan.calories - loggedCal);
-  const workoutIdx = (state.today-1) % state.profile.workoutDays;
-  const todaysWorkout = getWorkoutTemplates()[state.profile.workoutDays][workoutIdx];
-  const streak = computeStreak();
-
-  if(/\b(hi|hello|hey)\b/.test(text)){
-    return `Hey! Day ${state.today}${streak>0?`, ${streak}-day streak going`:""} — what can I help with?`;
-  }
-  if(/dislik|don.?t like|not a fan|which foods|hate.*food/.test(text)){
-    if(state.dislikedFoods.length){
-      return `So far, since you kept swapping ${state.dislikedFoods.length>1?"them":"it"} out, I've learned you're not into ${state.dislikedFoods.join(", ")} — I've stopped suggesting ${state.dislikedFoods.length>1?"those":"that"}.`;
-    }
-    return `You haven't ruled out any foods yet — if you keep swapping the same meal away, I'll learn to stop suggesting it.`;
-  }
-  if(/swap.*exercise|exercise.*swap|struggl.*exercise|replaced.*exercise|which exercise/.test(text)){
-    const swaps = Object.entries(state.exerciseSwaps);
-    if(swaps.length){
-      return `I've swapped ${swaps.map(([from,to])=>`${from} for ${to}`).join(", ")} since you kept skipping ${swaps.length>1?"them":"it"} — the replacements train similar muscles.`;
-    }
-    return `No exercise swaps yet — if you keep skipping the same move a few workouts in a row, I'll suggest a similar alternative automatically.`;
-  }
-  if(/calor/.test(text) || /(how much).*(eat|left)/.test(text)){
-    return `You've logged ${fmt(loggedCal)} of your ${fmt(plan.calories)} kcal target today — about ${fmt(remaining)} kcal left.`;
-  }
-  if(/protein|macro|carb|fat/.test(text)){
-    return `Your daily targets are ${plan.protein}g protein, ${plan.carbs}g carbs, and ${plan.fat}g fat.`;
-  }
-  if(/\bweight\b/.test(text)){
-    const wlog = state.weightLog;
-    const cur = wlog[wlog.length-1].weight, start = wlog[0].weight, target = state.profile.targetWeight;
-    const delta = Math.round(Math.abs(start-cur)*10)/10;
-    const direction = cur<start ? "down" : cur>start ? "up" : null;
-    return direction
-      ? `You've gone from ${start}kg to ${cur}kg (${delta}kg ${direction}) — goal is ${target}kg. Check the Progress tab for the full trend chart.`
-      : `You're holding steady at ${cur}kg so far. Goal is ${target}kg — check the Progress tab for the full trend chart.`;
-  }
-  if(/workout|exercise|train|session/.test(text)){
-    return log.workoutDone
-      ? `You already crushed ${todaysWorkout.day} today. Nice work!`
-      : `Today's session is ${todaysWorkout.day}. Tap "Start session" on your Today tab whenever you're ready.`;
-  }
-  if(/streak/.test(text)){
-    return streak>0 ? `You're on a ${streak}-day streak — keep it going!` : `No streak yet today — log a meal or workout to start one.`;
-  }
-  if(/goal|progress|(target.*weight)/.test(text)){
-    return `You're on track for roughly ${plan.weeksToGoal} weeks to reach ${state.profile.targetWeight}kg. Check the Progress tab for your full trend.`;
-  }
-  if(/meal|food|eat|hungry|snack/.test(text)){
-    const order = ["breakfast","lunch","dinner","snack"];
-    const next = order.find(slot=>!log.meals.find(m=>m.slot===slot && !m.extra));
-    if(next) return `Your next planned meal is ${plan.meals[next].name} (${plan.meals[next].cal} kcal). Not feeling it? Tap Swap for an alternative.`;
-    return `Looks like you've logged all your planned meals today. Nice work staying on track!`;
-  }
-  if(/tired|hard|give up|can.?t|discourag|struggl|stress/.test(text)){
-    return `Tough days happen to everyone. ${motivationalMessage()}`;
-  }
-  return null; // no rule matched — hand off to the LLM for open-ended/emotional questions
-}
-
-/* ---- hybrid chat: LLM fallback for anything the rule-based intents don't cover ----
-   Only reached when generateBotReply() returns null. Sends a snapshot of the
-   user's real numbers as context so the model never has to guess/compute them. */
+/* ---- chat: every question goes to the LLM, grounded with a snapshot of the
+   user's real numbers so the model never has to guess/compute them. ---- */
 const CHAT_API_BASE = "https://fit-buddy-smoky.vercel.app";
 function buildChatContext(){
   if(!state.profile || !state.plan) return {};
