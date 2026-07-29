@@ -96,14 +96,14 @@ Android needs no manual step — the plugin's own manifest declares
 which works in Chrome but has no Safari/iOS-WebView equivalent — that's why
 the native plugin above is what actually gets voice input working on iOS.
 
-## Required: Anthropic API key (for the chat assistant's LLM fallback)
+## Required: Anthropic API key (for the chat assistant and onboarding coach)
 
-The chat assistant is **hybrid**: fast, free, offline-capable rule-based
-answers for factual questions (calories, macros, streak, weight trend —
-anything with a real number, so it's never guessed or hallucinated), and a
-real Claude model (`api/chat.js`, using Haiku 4.5) for anything open-ended
-or emotional that the rules don't cover (see `generateBotReply` /
-`fetchLlmReply` in `app.js`).
+Every message in the "Speak to your FitBuddy" chat is answered by a real
+Claude model (`api/chat.js`, using Haiku 4.5, `fetchLlmReply` in `app.js`) —
+grounded with a snapshot of the user's real numbers (calories, streak,
+weight trend) so it never has to guess or hallucinate a figure. The
+onboarding chat/voice flow (see below) uses the same endpoint with a
+different persona and mode.
 
 This needs one env var set in your Vercel project — **Project Settings →
 Environment Variables**:
@@ -151,12 +151,31 @@ pick a simulator/emulator or a plugged-in device and hit Run.
   prototype kept all state in memory only (a chat/artifact sandbox rule).
   Since this is a real, packaged app now, `app.js` saves and restores state
   with `localStorage` automatically, so progress survives closing the app.
-- **The chat assistant is hybrid.** Factual questions (calories, macros,
-  streak, weight trend, disliked foods, exercise swaps) are still answered
-  instantly and offline by the original rule-based responder — no LLM
-  involved, so numbers are never hallucinated. Anything else (feelings,
-  motivation, open-ended questions) is routed to a real Claude model via
-  `api/chat.js`. See "Required: Anthropic API key" above.
+- **The chat assistant routes every message to a real Claude model**
+  (`api/chat.js`, Haiku 4.5), styled as a bodybuilding/fitness coach and
+  grounded with a snapshot of the user's real calories/streak/weight so it
+  never has to guess a number. See "Required: Anthropic API key" above.
+- **Onboarding chat/voice.** Alongside the quick 5-step form, the first
+  onboarding screen also offers "💬 Chat or speak with your coach"
+  (`renderOnboardChooser`/`renderOnboardChat` in `app.js`) — a hands-free
+  conversation (same auto-listen/auto-restart pattern as the main chat
+  widget) with a nutrition-coach persona (`ONBOARDING_PERSONA_PROMPT` in
+  `api/chat.js`) that asks about lifestyle, motivations, dietary
+  preferences/restrictions, schedule, and goals one question at a time in
+  plain language, instead of a form. It still needs a handful of concrete
+  numbers (name, sex, age, height, weight, workout days, location, diet
+  preference) to build a real plan — the model asks for those naturally
+  in conversation (accepting any units) rather than the user filling
+  fields, but every number the app actually calculates with (calorie
+  target, macros, target weight) still comes from the same deterministic
+  formulas as the form path (`calcPlan`/`estimateTargetWeight`) — the LLM
+  is never the one computing or inventing those. Each reply from the
+  server includes a structured extraction of what's been learned so far
+  (`mode:"onboarding"` in `api/chat.js`, parsed out of a trailing
+  `###PROFILE_JSON###` block server-side); once everything needed is
+  known, the client shows a plain-language summary of what it understood
+  with a "build my plan" button (or "I'd rather fine-tune it myself",
+  which drops you into the quick form with everything already filled in).
 - **Real local notifications.** The "we miss you" inactivity nudge now
   schedules a real OS-level notification via
   [`@capacitor/local-notifications`](https://capacitorjs.com/docs/apis/local-notifications)

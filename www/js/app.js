@@ -260,7 +260,17 @@ function effectiveExerciseName(name){
 let state = {
   screen: "onboarding", // onboarding | app | session
   tab: "today",
+  onboardMode: null, // null | "form" | "chat" — null shows the "how do you want to start" chooser
   onboardStep: 0,
+  onboardChat: {
+    voiceOutput: false,
+    voiceConversation: false, // hands-free mode: mic auto-restarts after every reply until the user leaves this screen
+    messages: [
+      {role:"bot", text:"Hi, I'm your FitBuddy coach! Tell me a bit about yourself and what you're hoping to achieve — type or tap the mic and just talk to me."}
+    ],
+    extracted: {}, // best-known structured fields the server has extracted from the conversation so far
+    readyToBuild: false, // true once the server reports the extraction is complete
+  },
   profile: null,
   plan: null, // {calories, protein, carbs, fat, meals:{breakfast,lunch,dinner,snack}, workoutDays}
   today: 1, // simulated day counter
@@ -579,6 +589,10 @@ function loadState(){
         state.chat.messages = state.chat.messages.filter(m=>!m.pending); // drop any interrupted in-flight request
       }
       if(state.chat) state.chat.voiceConversation = false; // never auto-start listening on a fresh page load
+      if(state.onboardChat && state.onboardChat.messages){
+        state.onboardChat.messages = state.onboardChat.messages.filter(m=>!m.pending);
+      }
+      if(state.onboardChat) state.onboardChat.voiceConversation = false;
     }
   }catch(e){ /* corrupt or unavailable storage — start fresh */ }
 }
@@ -628,6 +642,9 @@ function render(){
 const ONBOARD_STEPS = ["name","goal","stats","workout","diet"];
 
 function renderOnboarding(){
+  if(!state.onboardMode) return renderOnboardChooser();
+  if(state.onboardMode==="chat") return renderOnboardChat();
+
   const step = ONBOARD_STEPS[state.onboardStep];
   const p = state.profile || {};
   let body = "";
@@ -715,7 +732,7 @@ function renderOnboarding(){
   return `
   <div class="onboard-wrap">
     <div class="onboard-card">
-      ${state.onboardStep>0?`<button class="onboard-back" onclick="onboardBack()">←</button>`:""}
+      <button class="onboard-back" onclick="${state.onboardStep>0?'onboardBack()':'backToChooser()'}">←</button>
       <div class="step-label">Step ${state.onboardStep+1} of ${ONBOARD_STEPS.length}</div>
       <div class="progress-dots">${ONBOARD_STEPS.map((s,i)=>`<span class="${i<=state.onboardStep?'on':''}"></span>`).join("")}</div>
       <div class="onboard-header">
@@ -758,6 +775,197 @@ function onboardNext(){
   state.weightLog.push({day:1, weight:p.weight});
   state.screen="app";
   state.tab="today";
+  render();
+}
+
+/* ---- onboarding entry chooser: quick form vs. chat/voice with the coach ---- */
+function renderOnboardChooser(){
+  return `
+  <div class="onboard-wrap">
+    <div class="onboard-card">
+      <div class="onboard-header">
+        <h1>Hey there 👋</h1>
+        <p>How would you like to get started?</p>
+      </div>
+      <div class="field">
+        <button class="option-card" onclick="chooseOnboardMode('form')">
+          <div class="option-icon">📝</div>
+          <div class="option-label">Answer a few quick questions</div>
+        </button>
+        <button class="option-card" onclick="chooseOnboardMode('chat')">
+          <div class="option-icon">💬</div>
+          <div class="option-label">Chat or speak with your coach</div>
+        </button>
+      </div>
+    </div>
+  </div>`;
+}
+function chooseOnboardMode(mode){
+  state.onboardMode = mode;
+  render();
+  if(mode==="chat") startOnboardVoice();
+}
+function backToChooser(){
+  stopOnboardVoice();
+  state.onboardMode = null;
+  render();
+}
+
+/* ---- onboarding chat/voice: same hands-free pattern as the main chat widget,
+   but talking to the api/chat.js "onboarding" mode instead, which returns a
+   structured extraction of the profile fields alongside its reply. ---- */
+let obVoiceSessionId = 0;
+function onboardVoiceSession(){
+  return { micBtnId:"ob-chat-mic-btn", onTranscript:(t)=>{
+    const input = document.getElementById("ob-chat-input");
+    if(input) input.value = t;
+    sendOnboardChat();
+  }};
+}
+function startOnboardVoice(){
+  state.onboardChat.voiceConversation = true;
+  obVoiceSessionId++;
+  const mySession = obVoiceSessionId;
+  setTimeout(()=>{ if(state.onboardMode==="chat" && state.onboardChat.voiceConversation && obVoiceSessionId===mySession) startVoiceInput(onboardVoiceSession()); }, 300);
+}
+function stopOnboardVoice(){
+  state.onboardChat.voiceConversation = false;
+  obVoiceSessionId++; // invalidate any pending re-listen timeout
+  stopVoiceInput();
+  if(window.speechSynthesis) speechSynthesis.cancel();
+}
+function continueOnboardVoiceConversation(){
+  if(state.onboardMode!=="chat" || !state.onboardChat.voiceConversation) return;
+  const mySession = obVoiceSessionId;
+  setTimeout(()=>{ if(state.onboardMode==="chat" && state.onboardChat.voiceConversation && obVoiceSessionId===mySession) startVoiceInput(onboardVoiceSession()); }, 300);
+}
+function toggleOnboardVoiceOutput(){
+  state.onboardChat.voiceOutput = !state.onboardChat.voiceOutput;
+  if(!state.onboardChat.voiceOutput && window.speechSynthesis) speechSynthesis.cancel();
+  render();
+}
+
+const GOAL_LABELS = {lose_fat:"Lose fat & get lean", build_muscle:"Build muscle", maintain:"Maintain & recomp"};
+const DIET_LABELS = {none:"No restrictions", vegetarian:"Vegetarian", vegan:"Vegan", pescatarian:"Pescatarian"};
+function renderOnboardChat(){
+  const oc = state.onboardChat;
+  const hasSpeechInput = hasNativeSpeechInput() || !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+  const e = oc.extracted || {};
+  const summary = oc.readyToBuild ? `
+    <div class="field ob-chat-summary">
+      <label>Here's what I've got so far</label>
+      <div class="empty-note" style="line-height:1.7;">
+        ${e.name?`<div>👤 ${escapeHtml(e.name)}</div>`:""}
+        ${e.goal?`<div>🎯 ${GOAL_LABELS[e.goal]||e.goal}</div>`:""}
+        ${(e.age||e.sex)?`<div>🧬 ${[e.sex,e.age?`${e.age}y`:null].filter(Boolean).join(", ")}</div>`:""}
+        ${(e.height||e.weight)?`<div>📏 ${[e.height?`${e.height}cm`:null,e.weight?`${e.weight}kg`:null].filter(Boolean).join(", ")}</div>`:""}
+        ${(e.workoutDays||e.location)?`<div>🏋️ ${[e.workoutDays?`${e.workoutDays} days/week`:null,e.location].filter(Boolean).join(", ")}</div>`:""}
+        ${e.dietPref?`<div>🍽️ ${DIET_LABELS[e.dietPref]||e.dietPref}${e.allergies&&e.allergies.length?` (avoiding ${e.allergies.join(", ")})`:""}</div>`:""}
+      </div>
+      <div class="step-nav" style="margin-top:12px;">
+        <button class="btn btn-primary btn-round" style="padding:12px 28px;font-size:14.5px;" onclick="finalizeOnboardChat()">Looks good — build my plan</button>
+        <button class="btn btn-round" style="padding:10px 20px;font-size:13.5px;margin-top:8px;" onclick="switchToFormFromChat()">I'd rather fine-tune it myself</button>
+      </div>
+    </div>` : "";
+  return `
+  <div class="onboard-wrap">
+    <div class="onboard-card ob-chat-card">
+      <button class="onboard-back" onclick="backToChooser()">←</button>
+      <div class="onboard-header">
+        <h1>💬 Chat with your coach</h1>
+        <p>Tell me about your lifestyle and goals — I'll figure out the rest.</p>
+      </div>
+      <div class="chat-messages ob-chat-messages" id="ob-chat-messages">
+        ${oc.messages.map(m=> m.pending
+          ? `<div class="chat-msg bot chat-typing"><span></span><span></span><span></span></div>`
+          : `<div class="chat-msg ${m.role}">${escapeHtml(m.text)}</div>`
+        ).join("")}
+      </div>
+      ${summary}
+      ${!oc.readyToBuild ? `
+      <div class="chat-input-row">
+        <input id="ob-chat-input" type="text" placeholder="Tell me about yourself..." onkeydown="if(event.key==='Enter'){sendOnboardChat();}">
+        ${hasSpeechInput ? `<button id="ob-chat-mic-btn" class="chat-mic" onclick="startVoiceInput(onboardVoiceSession())" aria-label="Speak">🎤</button>` : ""}
+        <button class="chat-send" onclick="sendOnboardChat()" aria-label="Send">➤</button>
+      </div>
+      <div style="text-align:center;padding-top:6px;">
+        <button class="x-btn" onclick="toggleOnboardVoiceOutput()" aria-label="${oc.voiceOutput?'Mute spoken replies':'Read replies aloud'}">${oc.voiceOutput?'🔊 Voice replies on':'🔇 Voice replies off'}</button>
+      </div>` : ""}
+    </div>
+  </div>`;
+}
+function sendOnboardChat(){
+  const input = document.getElementById("ob-chat-input");
+  if(!input) return;
+  const text = input.value.trim();
+  if(!text) return;
+  state.onboardChat.messages.push({role:"user", text});
+  input.value = "";
+  state.onboardChat.messages.push({role:"bot", text:"", pending:true});
+  render();
+  fetchOnboardingReply();
+}
+async function fetchOnboardingReply(){
+  try{
+    const history = state.onboardChat.messages.filter(m=>!m.pending).map(m=>({role:m.role, text:m.text}));
+    const res = await fetch(`${CHAT_API_BASE}/api/chat`, {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({mode:"onboarding", history, extracted: state.onboardChat.extracted}),
+    });
+    if(!res.ok) throw new Error("bad response");
+    const data = await res.json();
+    applyOnboardingReply(data.reply, data.extracted, data.complete);
+  }catch(e){
+    applyOnboardingReply("I'm having trouble connecting right now — mind trying again in a moment? You can also switch to the quick question form from the back arrow.", state.onboardChat.extracted, false);
+  }
+}
+function applyOnboardingReply(replyText, extracted, complete){
+  const oc = state.onboardChat;
+  const text = replyText || "Could you tell me a bit more about that?";
+  const idx = oc.messages.findIndex(m=>m.pending);
+  if(idx>=0) oc.messages[idx] = {role:"bot", text};
+  else oc.messages.push({role:"bot", text});
+  oc.extracted = extracted || oc.extracted;
+  if(complete){
+    oc.readyToBuild = true;
+    stopOnboardVoice();
+  }
+  render();
+  speakText(text, oc.voiceOutput, complete ? null : continueOnboardVoiceConversation);
+}
+function finalizeOnboardChat(){
+  const e = state.onboardChat.extracted || {};
+  const p = {
+    name: e.name || "",
+    sex: e.sex, age: e.age, height: e.height, weight: e.weight,
+    goal: e.goal, workoutDays: e.workoutDays, location: e.location,
+    dietPref: e.dietPref || "none", allergies: e.allergies || [],
+    coachNotes: e.notes || "",
+  };
+  p.targetWeight = estimateTargetWeight(p.goal, p.weight, p.height);
+  state.profile = p;
+  const plan = calcPlan(p);
+  plan.meals = buildMealPlan(p, plan, null);
+  state.plan = plan;
+  state.weightLog.push({day:1, weight:p.weight});
+  state.screen = "app";
+  state.tab = "today";
+  render();
+}
+function switchToFormFromChat(){
+  const e = state.onboardChat.extracted || {};
+  state.profile = Object.assign({}, state.profile, {
+    name: e.name, sex: e.sex, age: e.age, height: e.height, weight: e.weight,
+    goal: e.goal, workoutDays: e.workoutDays, location: e.location,
+    dietPref: e.dietPref, allergies: e.allergies || [],
+  });
+  if(state.profile.goal && state.profile.weight && state.profile.height){
+    state.profile.targetWeight = estimateTargetWeight(state.profile.goal, state.profile.weight, state.profile.height);
+  }
+  stopOnboardVoice();
+  state.onboardMode = "form";
+  state.onboardStep = 0;
   render();
 }
 
@@ -1293,6 +1501,15 @@ function escapeHtml(str){
    (e.g. a quick close+reopen) can tell it's no longer current and no-op,
    even though state.chat.open/voiceConversation look true again by then */
 let voiceSessionId = 0;
+/* the {micBtnId, onTranscript} descriptor the shared voice engine below uses
+   for the floating "Speak to your FitBuddy" chat widget specifically */
+function mainChatVoiceSession(){
+  return { micBtnId:"chat-mic-btn", onTranscript:(t)=>{
+    const input = document.getElementById("chat-input");
+    if(input) input.value = t;
+    sendChat();
+  }};
+}
 function toggleChat(){
   state.chat.open = !state.chat.open;
   voiceSessionId++;
@@ -1300,7 +1517,7 @@ function toggleChat(){
     state.chat.voiceConversation = true;
     updateChatWidget();
     const mySession = voiceSessionId;
-    setTimeout(()=>{ if(state.chat.open && voiceSessionId===mySession) startVoiceInput(); }, 300);
+    setTimeout(()=>{ if(state.chat.open && voiceSessionId===mySession) startVoiceInput(mainChatVoiceSession()); }, 300);
   } else {
     state.chat.voiceConversation = false;
     stopVoiceInput();
@@ -1312,7 +1529,7 @@ function toggleChat(){
 function continueVoiceConversation(){
   if(!state.chat.open || !state.chat.voiceConversation) return;
   const mySession = voiceSessionId;
-  setTimeout(()=>{ if(state.chat.open && state.chat.voiceConversation && voiceSessionId===mySession) startVoiceInput(); }, 300);
+  setTimeout(()=>{ if(state.chat.open && state.chat.voiceConversation && voiceSessionId===mySession) startVoiceInput(mainChatVoiceSession()); }, 300);
 }
 function toggleVoiceOutput(){
   state.chat.voiceOutput = !state.chat.voiceOutput;
@@ -1327,9 +1544,9 @@ function getEnglishVoice(){
   if(!voices.length) return null;
   return voices.find(v=>v.lang==="en-GB") || voices.find(v=>v.lang && v.lang.startsWith("en")) || voices[0];
 }
-function speakText(text, onDone){
+function speakText(text, voiceOutputEnabled, onDone){
   const finish = ()=>{ if(onDone) onDone(); };
-  if(!state.chat.voiceOutput || !window.speechSynthesis || !text){ finish(); return; }
+  if(!voiceOutputEnabled || !window.speechSynthesis || !text){ finish(); return; }
   const doSpeak = ()=>{
     speechSynthesis.cancel();
     const utter = new SpeechSynthesisUtterance(text);
@@ -1348,8 +1565,14 @@ function speakText(text, onDone){
 function hasNativeSpeechInput(){
   return isNativeApp() && !!(window.Capacitor && Capacitor.Plugins && Capacitor.Plugins.SpeechRecognition);
 }
+/* Generic mic engine shared by every chat surface (main widget + onboarding
+   chat) — only one recognition session can ever be active at once, matching
+   a real device's single microphone. Callers pass a session descriptor
+   {micBtnId, onTranscript} rather than this file hardcoding one input/button
+   pair, so a second chat surface can reuse the exact same start/stop logic. */
 let __activeRecognition = null;
 let __voiceInputActive = false;
+let __activeVoiceSession = null;
 function stopVoiceInput(){
   __voiceInputActive = false;
   if(hasNativeSpeechInput()){
@@ -1358,16 +1581,20 @@ function stopVoiceInput(){
     try{ __activeRecognition.stop(); }catch(e){ /* already stopped */ }
     __activeRecognition = null;
   }
-  const micBtn = document.getElementById("chat-mic-btn");
-  if(micBtn) micBtn.classList.remove("listening");
+  if(__activeVoiceSession){
+    const micBtn = document.getElementById(__activeVoiceSession.micBtnId);
+    if(micBtn) micBtn.classList.remove("listening");
+  }
+  __activeVoiceSession = null;
 }
-function startVoiceInput(){
+function startVoiceInput(session){
   if(__voiceInputActive) return; // a session is already listening/in-flight — never stack a second one
-  if(hasNativeSpeechInput()){ startVoiceInputNative(); return; }
+  __activeVoiceSession = session;
+  if(hasNativeSpeechInput()){ startVoiceInputNative(session); return; }
   const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if(!SpeechRecognitionCtor) return;
+  if(!SpeechRecognitionCtor){ __activeVoiceSession = null; return; }
   __voiceInputActive = true;
-  const micBtn = document.getElementById("chat-mic-btn");
+  const micBtn = document.getElementById(session.micBtnId);
   const recognition = new SpeechRecognitionCtor();
   __activeRecognition = recognition;
   recognition.lang = "en-GB";
@@ -1381,19 +1608,17 @@ function startVoiceInput(){
   };
   recognition.onresult = (e)=>{
     const transcript = e.results[0][0].transcript;
-    const input = document.getElementById("chat-input");
-    if(input) input.value = transcript;
-    sendChat();
+    session.onTranscript(transcript);
   };
   recognition.onerror = stopListening;
   recognition.onend = stopListening;
   recognition.start();
 }
 /* native speech-to-text via @capacitor-community/speech-recognition (iOS/Android) */
-async function startVoiceInputNative(){
+async function startVoiceInputNative(session){
   __voiceInputActive = true;
   const SR = Capacitor.Plugins.SpeechRecognition;
-  const micBtn = document.getElementById("chat-mic-btn");
+  const micBtn = document.getElementById(session.micBtnId);
   try{
     const {available} = await SR.available();
     if(!available) return;
@@ -1405,9 +1630,7 @@ async function startVoiceInputNative(){
     if(micBtn) micBtn.classList.add("listening");
     const result = await SR.start({language:"en-GB", maxResults:1, partialResults:false, popup:false});
     if(result && result.matches && result.matches.length){
-      const input = document.getElementById("chat-input");
-      if(input) input.value = result.matches[0];
-      sendChat();
+      session.onTranscript(result.matches[0]);
     }
   }catch(e){ /* permission denied or recognition error — no-op */
   }finally{
@@ -1450,7 +1673,7 @@ function renderChatWidget(){
       </div>
       <div class="chat-input-row">
         <input id="chat-input" type="text" placeholder="Ask your FitBuddy..." onkeydown="if(event.key==='Enter'){sendChat();}">
-        ${hasSpeechInput ? `<button id="chat-mic-btn" class="chat-mic" onclick="startVoiceInput()" aria-label="Speak">🎤</button>` : ""}
+        ${hasSpeechInput ? `<button id="chat-mic-btn" class="chat-mic" onclick="startVoiceInput(mainChatVoiceSession())" aria-label="Speak">🎤</button>` : ""}
         <button class="chat-send" onclick="sendChat()" aria-label="Send">➤</button>
       </div>
     </div>`;
@@ -1467,7 +1690,7 @@ function sendChat(){
     const reply = "Once you finish setting up your plan, I'll be able to answer questions about your calories, workouts, and progress. Excited to get started? 💪";
     state.chat.messages.push({role:"bot", text:reply});
     updateChatWidget();
-    speakText(reply, continueVoiceConversation);
+    speakText(reply, state.chat.voiceOutput, continueVoiceConversation);
     return;
   }
   state.chat.messages.push({role:"bot", text:"", pending:true});
@@ -1501,7 +1724,7 @@ function replacePendingBotMessage(text){
   if(idx>=0) state.chat.messages[idx] = {role:"bot", text};
   else state.chat.messages.push({role:"bot", text});
   updateChatWidget();
-  speakText(text, continueVoiceConversation);
+  speakText(text, state.chat.voiceOutput, continueVoiceConversation);
 }
 async function fetchLlmReply(userText){
   try{

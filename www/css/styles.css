@@ -388,3 +388,8 @@
     .chat-fab{bottom:80px;}
     .chat-panel{bottom:80px;right:12px;width:calc(100vw - 24px);}
   }
+
+  /* ---------- Onboarding chat/voice (reuses the chat widget's classes above) ---------- */
+  .ob-chat-card{display:flex;flex-direction:column;}
+  .ob-chat-messages{max-height:320px;min-height:180px;border:1px solid var(--line);border-radius:14px;background:rgba(0,0,0,0.15);margin-bottom:6px;}
+  .ob-chat-summary .step-nav{flex-direction:column;align-items:stretch;}
