@@ -312,6 +312,23 @@ function maybeCalorieOverageNudge(){
 }
 
 /* ============================= HELPERS ============================= */
+/* Weight/height are always stored in the profile as kg/cm (calcPlan and
+   estimateTargetWeight below use the standard Mifflin-St Jeor formula, which
+   requires metric units) — these only convert for display/entry so the
+   onboarding form can offer a kg/lb and cm/in toggle. */
+function kgToLb(kg){ return kg*2.20462; }
+function lbToKg(lb){ return lb/2.20462; }
+function cmToIn(cm){ return cm/2.54; }
+function inToCm(inch){ return inch*2.54; }
+function displayWeight(kg, unit){
+  if(kg===null||kg===undefined||kg==="") return "";
+  return unit==="lb" ? Math.round(kgToLb(kg)*10)/10 : kg;
+}
+function displayHeight(cm, unit){
+  if(cm===null||cm===undefined||cm==="") return "";
+  return unit==="in" ? Math.round(cmToIn(cm)*10)/10 : cm;
+}
+
 function estimateTargetWeight(goal, weight, height){
   if(!goal || !weight || !height) return null;
   const heightM = height/100;
@@ -666,6 +683,12 @@ function renderOnboarding(){
           </button>`).join("")}
       </div>`;
   } else if(step==="stats"){
+    const heightUnit = p.heightUnit || "cm";
+    const weightUnit = p.weightUnit || "kg";
+    const heightMin = heightUnit==="in" ? Math.round(cmToIn(120)) : 120;
+    const heightMax = heightUnit==="in" ? Math.round(cmToIn(230)) : 230;
+    const weightMin = weightUnit==="lb" ? Math.round(kgToLb(35)) : 35;
+    const weightMax = weightUnit==="lb" ? Math.round(kgToLb(220)) : 220;
     body = `
       <div class="grid-2">
         <div class="field"><label>Sex</label>
@@ -679,15 +702,28 @@ function renderOnboarding(){
         <div class="field"><label>Age</label>
           <input id="ob-age" type="number" min="16" max="90" value="${p.age||''}" oninput="setProfile('age', +this.value)">
         </div>
-        <div class="field"><label>Height (cm)</label>
-          <input id="ob-height" type="number" min="120" max="230" value="${p.height||''}" oninput="setProfile('height', +this.value)">
+        <div class="field">
+          <div class="field-label-row"><label style="margin-bottom:0;">Height</label>
+            <div class="unit-toggle">
+              <button type="button" class="unit-btn ${heightUnit==='cm'?'active':''}" onclick="setHeightUnit('cm')">cm</button>
+              <button type="button" class="unit-btn ${heightUnit==='in'?'active':''}" onclick="setHeightUnit('in')">in</button>
+            </div>
+          </div>
+          <input id="ob-height" type="number" step="0.1" min="${heightMin}" max="${heightMax}" value="${displayHeight(p.height, heightUnit)}" oninput="setHeightInput(this.value)">
         </div>
-        <div class="field"><label>Current weight (kg)</label>
-          <input id="ob-weight" type="number" min="35" max="220" value="${p.weight||''}" oninput="setProfile('weight', +this.value)">
+        <div class="field">
+          <div class="field-label-row"><label style="margin-bottom:0;">Current weight</label>
+            <div class="unit-toggle">
+              <button type="button" class="unit-btn ${weightUnit==='kg'?'active':''}" onclick="setWeightUnit('kg')">kg</button>
+              <button type="button" class="unit-btn ${weightUnit==='lb'?'active':''}" onclick="setWeightUnit('lb')">lb</button>
+            </div>
+          </div>
+          <input id="ob-weight" type="number" step="0.1" min="${weightMin}" max="${weightMax}" value="${displayWeight(p.weight, weightUnit)}" oninput="setWeightInput(this.value)">
         </div>
-        <div class="field"><label>Target weight (kg)</label>
-          <input id="ob-target-weight" type="number" min="35" max="220" value="${p.targetWeight||''}" oninput="setTargetWeightManual(+this.value)">
-          ${(p.goal && p.weight && p.height) ? `<div class="empty-note" style="padding-top:4px;">Estimated for your goal: <span class="mono" style="color:var(--amber)">${estimateTargetWeight(p.goal,p.weight,p.height)}kg</span> — feel free to adjust.</div>` : ""}
+        <div class="field">
+          <label>Target weight (${weightUnit})</label>
+          <input id="ob-target-weight" type="number" step="0.1" min="${weightMin}" max="${weightMax}" value="${displayWeight(p.targetWeight, weightUnit)}" oninput="setTargetWeightInput(this.value)">
+          ${(p.goal && p.weight && p.height) ? `<div class="empty-note" style="padding-top:4px;">Estimated for your goal: <span class="mono" style="color:var(--amber)">${displayWeight(estimateTargetWeight(p.goal,p.weight,p.height), weightUnit)}${weightUnit}</span> — feel free to adjust.</div>` : ""}
         </div>
       </div>`;
   } else if(step==="workout"){
@@ -764,6 +800,31 @@ function setTargetWeightManual(val){
   state.profile.targetWeightManual = true;
   render();
 }
+function setHeightUnit(unit){
+  state.profile = state.profile || {};
+  state.profile.heightUnit = unit;
+  render();
+}
+function setWeightUnit(unit){
+  state.profile = state.profile || {};
+  state.profile.weightUnit = unit;
+  render();
+}
+function setHeightInput(raw){
+  const unit = (state.profile && state.profile.heightUnit) || "cm";
+  const val = +raw;
+  setProfile("height", unit==="in" ? Math.round(inToCm(val)) : val);
+}
+function setWeightInput(raw){
+  const unit = (state.profile && state.profile.weightUnit) || "kg";
+  const val = +raw;
+  setProfile("weight", unit==="lb" ? Math.round(lbToKg(val)*10)/10 : val);
+}
+function setTargetWeightInput(raw){
+  const unit = (state.profile && state.profile.weightUnit) || "kg";
+  const val = +raw;
+  setTargetWeightManual(unit==="lb" ? Math.round(lbToKg(val)*10)/10 : val);
+}
 function onboardBack(){ state.onboardStep=Math.max(0,state.onboardStep-1); render(); }
 function onboardNext(){
   if(state.onboardStep < ONBOARD_STEPS.length-1){ state.onboardStep++; render(); return; }
@@ -816,11 +877,18 @@ function backToChooser(){
    structured extraction of the profile fields alongside its reply. ---- */
 let obVoiceSessionId = 0;
 function onboardVoiceSession(){
-  return { micBtnId:"ob-chat-mic-btn", onTranscript:(t)=>{
-    const input = document.getElementById("ob-chat-input");
-    if(input) input.value = t;
-    sendOnboardChat();
-  }};
+  return {
+    micBtnId:"ob-chat-mic-btn",
+    onInterim:(t)=>{
+      const input = document.getElementById("ob-chat-input");
+      if(input) input.value = t;
+    },
+    onTranscript:(t)=>{
+      const input = document.getElementById("ob-chat-input");
+      if(input) input.value = t;
+      sendOnboardChat();
+    },
+  };
 }
 function startOnboardVoice(){
   state.onboardChat.voiceConversation = true;
@@ -1501,14 +1569,21 @@ function escapeHtml(str){
    (e.g. a quick close+reopen) can tell it's no longer current and no-op,
    even though state.chat.open/voiceConversation look true again by then */
 let voiceSessionId = 0;
-/* the {micBtnId, onTranscript} descriptor the shared voice engine below uses
-   for the floating "Speak to your FitBuddy" chat widget specifically */
+/* the {micBtnId, onTranscript, onInterim} descriptor the shared voice engine
+   below uses for the floating "Speak to your FitBuddy" chat widget specifically */
 function mainChatVoiceSession(){
-  return { micBtnId:"chat-mic-btn", onTranscript:(t)=>{
-    const input = document.getElementById("chat-input");
-    if(input) input.value = t;
-    sendChat();
-  }};
+  return {
+    micBtnId:"chat-mic-btn",
+    onInterim:(t)=>{
+      const input = document.getElementById("chat-input");
+      if(input) input.value = t;
+    },
+    onTranscript:(t)=>{
+      const input = document.getElementById("chat-input");
+      if(input) input.value = t;
+      sendChat();
+    },
+  };
 }
 function toggleChat(){
   state.chat.open = !state.chat.open;
@@ -1568,17 +1643,32 @@ function hasNativeSpeechInput(){
 /* Generic mic engine shared by every chat surface (main widget + onboarding
    chat) — only one recognition session can ever be active at once, matching
    a real device's single microphone. Callers pass a session descriptor
-   {micBtnId, onTranscript} rather than this file hardcoding one input/button
-   pair, so a second chat surface can reuse the exact same start/stop logic. */
+   {micBtnId, onTranscript, onInterim} rather than this file hardcoding one
+   input/button pair, so a second chat surface can reuse the exact same
+   start/stop logic.
+
+   Both the Web Speech API (continuous=false) and the native plugin's
+   start() auto-stop after the FIRST short pause in speech, not once the
+   user is actually done talking — that's what was cutting people off
+   mid-sentence during onboarding. Fixed by: continuous+interimResults on
+   the web, and re-arming a fresh native session every time one ends on its
+   own, in both cases only stopping for real once the user explicitly taps
+   the mic again ("finish") or the surface is torn down ("cancel", which
+   discards whatever was captured instead of submitting it). */
 let __activeRecognition = null;
 let __voiceInputActive = false;
 let __activeVoiceSession = null;
+let __voiceInputCancelled = false; // true = tearing down; discard partial speech, don't submit
+let __voiceInputFinishing = false; // true = user asked to end their turn now; submit and stop re-arming
+
 function stopVoiceInput(){
+  __voiceInputCancelled = true;
+  __voiceInputFinishing = true;
   __voiceInputActive = false;
   if(hasNativeSpeechInput()){
     try{ Capacitor.Plugins.SpeechRecognition.stop(); }catch(e){ /* nothing to stop */ }
   } else if(__activeRecognition){
-    try{ __activeRecognition.stop(); }catch(e){ /* already stopped */ }
+    try{ __activeRecognition.abort(); }catch(e){ /* already stopped */ }
     __activeRecognition = null;
   }
   if(__activeVoiceSession){
@@ -1588,7 +1678,19 @@ function stopVoiceInput(){
   __activeVoiceSession = null;
 }
 function startVoiceInput(session){
-  if(__voiceInputActive) return; // a session is already listening/in-flight — never stack a second one
+  if(__voiceInputActive){
+    // tapping the mic again while it's already listening means "I'm done talking" —
+    // gracefully finish the current session so whatever was said gets submitted
+    __voiceInputFinishing = true;
+    if(hasNativeSpeechInput()){
+      try{ Capacitor.Plugins.SpeechRecognition.stop(); }catch(e){ /* already stopped */ }
+    } else if(__activeRecognition){
+      try{ __activeRecognition.stop(); }catch(e){ /* already stopped */ }
+    }
+    return;
+  }
+  __voiceInputCancelled = false;
+  __voiceInputFinishing = false;
   __activeVoiceSession = session;
   if(hasNativeSpeechInput()){ startVoiceInputNative(session); return; }
   const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -1598,27 +1700,44 @@ function startVoiceInput(session){
   const recognition = new SpeechRecognitionCtor();
   __activeRecognition = recognition;
   recognition.lang = "en-GB";
-  recognition.interimResults = false;
+  recognition.continuous = true; // keep listening through natural pauses/breaths, not just the first one
+  recognition.interimResults = true; // lets us show live progress and know we're still hearing them
   recognition.maxAlternatives = 1;
   if(micBtn) micBtn.classList.add("listening");
-  const stopListening = ()=>{
+  let finalTranscript = "";
+  recognition.onresult = (e)=>{
+    let interim = "";
+    for(let i=e.resultIndex; i<e.results.length; i++){
+      const piece = e.results[i][0].transcript;
+      if(e.results[i].isFinal) finalTranscript += piece + " ";
+      else interim += piece;
+    }
+    if(session.onInterim) session.onInterim((finalTranscript + interim).trim());
+  };
+  const finish = ()=>{
     __voiceInputActive = false;
     if(micBtn) micBtn.classList.remove("listening");
     if(__activeRecognition===recognition) __activeRecognition = null;
+    const transcript = finalTranscript.trim();
+    if(!__voiceInputCancelled && transcript) session.onTranscript(transcript);
   };
-  recognition.onresult = (e)=>{
-    const transcript = e.results[0][0].transcript;
-    session.onTranscript(transcript);
-  };
-  recognition.onerror = stopListening;
-  recognition.onend = stopListening;
+  recognition.onerror = finish;
+  recognition.onend = finish;
   recognition.start();
 }
-/* native speech-to-text via @capacitor-community/speech-recognition (iOS/Android) */
+/* native speech-to-text via @capacitor-community/speech-recognition (iOS/Android).
+   Its start() always ends after one short utterance — there's no continuous/
+   timeout option in this plugin — so a single call has the exact same
+   premature-cutoff problem as the web branch used to. We compensate by
+   re-arming a fresh session immediately whenever one ends on its own,
+   accumulating the transcript across the chain, so from the user's
+   perspective the mic just keeps listening until they're actually done. */
 async function startVoiceInputNative(session){
   __voiceInputActive = true;
   const SR = Capacitor.Plugins.SpeechRecognition;
   const micBtn = document.getElementById(session.micBtnId);
+  let finalTranscript = "";
+  let partialListener = null;
   try{
     const {available} = await SR.available();
     if(!available) return;
@@ -1628,14 +1747,22 @@ async function startVoiceInputNative(session){
       if(perm.speechRecognition!=="granted") return;
     }
     if(micBtn) micBtn.classList.add("listening");
-    const result = await SR.start({language:"en-GB", maxResults:1, partialResults:false, popup:false});
-    if(result && result.matches && result.matches.length){
-      session.onTranscript(result.matches[0]);
+    partialListener = await SR.addListener("partialResults", (data)=>{
+      const text = data && data.matches && data.matches[0];
+      if(text && session.onInterim) session.onInterim((finalTranscript + " " + text).trim());
+    });
+    while(!__voiceInputCancelled && !__voiceInputFinishing){
+      const result = await SR.start({language:"en-GB", maxResults:1, partialResults:true, popup:false});
+      const piece = result && result.matches && result.matches[0];
+      if(!piece) break; // no speech captured this round — stop chaining rather than loop silently forever
+      finalTranscript = (finalTranscript + " " + piece).trim();
     }
   }catch(e){ /* permission denied or recognition error — no-op */
   }finally{
+    if(partialListener) partialListener.remove();
     __voiceInputActive = false;
     if(micBtn) micBtn.classList.remove("listening");
+    if(!__voiceInputCancelled && finalTranscript) session.onTranscript(finalTranscript);
   }
 }
 
