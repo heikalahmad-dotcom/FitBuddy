@@ -273,6 +273,8 @@ let state = {
   },
   profile: null,
   plan: null, // {calories, protein, carbs, fat, meals:{breakfast,lunch,dinner,snack}, workoutDays}
+  nutritionPlan: null, // {calories,protein,carbs,fat,fiber,water,mealTiming,weeklyGoals,groceryRecommendations,foodsToPrioritize,foodsToReduce,restaurantGuide,healthySubstitutions,fallback}
+  nutritionPlanLoading: false,
   today: 1, // simulated day counter
   weightLog: [], // {day, weight}
   logs: {}, // day -> {meals:[{slot,name,cal,extra,unhealthy}], workoutDone:bool, setsDone:{exIdx:[bool,...]}}
@@ -371,6 +373,98 @@ function calcPlan(p){
   const weeksToGoal = Math.max(1, Math.round(Math.abs(p.targetWeight-p.weight)/weeklyRate));
 
   return {calories, protein, carbs, fat, tdee:Math.round(tdee), weeklyRate, weeksToGoal, startWeight:p.weight};
+}
+
+/* fiber & water targets for the Nutrition Plan Generator — kept deterministic
+   (standard guideline formulas) like every other number the app tracks with,
+   rather than left for the LLM to invent, so they never conflict with what's
+   shown elsewhere and stay consistent across regenerations */
+function calcNutritionTargets(p, plan){
+  const fiber = Math.round(plan.calories/1000*14); // ~14g fiber per 1000kcal (Dietary Guidelines for Americans)
+  const activityBump = p.workoutDays>=5 ? 0.6 : p.workoutDays>=3 ? 0.4 : p.workoutDays>=1 ? 0.2 : 0;
+  const water = Math.round((p.weight*0.035 + activityBump)*10)/10; // ~35ml/kg baseline + extra for training days
+  return {calories:plan.calories, protein:plan.protein, carbs:plan.carbs, fat:plan.fat, fiber, water};
+}
+
+/* goal-tailored, deterministic fallback for the qualitative strategy fields —
+   used when the LLM call fails so onboarding never gets stuck waiting on a
+   network request, and so the Diet tab always has something useful to show */
+const NUTRITION_STRATEGY_FALLBACKS = {
+  lose_fat: {
+    mealTiming: "Eat 3 balanced meals plus a protein-rich snack every 3-4 hours — steady protein intake keeps you full and makes the calorie deficit easier to stick with.",
+    weeklyGoals: [
+      "Hit your protein target on at least 6 of 7 days — it's the single biggest lever for staying full in a deficit",
+      "Log every meal, even the imperfect ones — consistency beats perfection",
+      "Walk 20-30 minutes on non-workout days to add extra calorie burn without extra hunger",
+    ],
+    groceryRecommendations: ["Leafy greens & mixed veggies", "Chicken breast or tofu", "Greek yogurt", "Berries", "Eggs", "Oats", "Canned beans/lentils", "Sparkling water"],
+    foodsToPrioritize: ["Lean protein at every meal — highest satiety per calorie", "High-fiber vegetables — bulk up meals for fewer calories", "Whole fruit over juice — fiber slows sugar absorption", "Water before meals — helps control portions"],
+    foodsToReduce: ["Sugary drinks and juice — easy to overconsume calories without feeling full", "Fried and heavily processed snacks — calorie-dense, low satiety", "Alcohol — adds calories with little nutritional benefit"],
+    restaurantGuide: ["Choose grilled or baked protein over fried", "Ask for dressing/sauce on the side", "Start with a side salad or broth soup to add volume before the main"],
+    healthySubstitutions: ["Swap fries for a side salad — cuts calories, adds fiber", "Swap soda for sparkling water — removes empty sugar calories", "Swap creamy sauces for salsa or mustard — fewer calories, similar flavor"],
+  },
+  build_muscle: {
+    mealTiming: "Spread protein evenly across 4-5 meals or snacks a day, and eat a protein + carb combo within an hour or two after training to support recovery.",
+    weeklyGoals: [
+      "Hit your protein target every single day — it's what actually builds muscle, not just training",
+      "Complete all planned workout days — consistency drives the calorie surplus to good use",
+      "Add an extra snack on training days if you're falling short on calories",
+    ],
+    groceryRecommendations: ["Chicken, beef, or fish", "Eggs", "Greek yogurt & cottage cheese", "Rice & potatoes", "Oats", "Nut butter", "Bananas", "Mixed frozen veggies"],
+    foodsToPrioritize: ["Protein with every meal — muscle repair needs a steady supply", "Calorie-dense whole foods — makes hitting a surplus easier", "Complex carbs around workouts — fuels training and recovery", "Healthy fats (nuts, olive oil, avocado) — supports hormone health"],
+    foodsToReduce: ["Excess added sugar — crowds out more useful calories", "Low-protein processed snacks — fill you up without building muscle", "Too much alcohol — impairs recovery and protein synthesis"],
+    restaurantGuide: ["Order a protein-forward main and add a side of rice or potatoes", "Don't be afraid of larger portions — you're eating for a surplus", "Add extra sides (beans, avocado) to boost calories without junk food"],
+    healthySubstitutions: ["Swap sugary cereal for oats + fruit + protein — steadier energy, more protein", "Swap soda for a fruit smoothie with protein — turns empty calories into useful ones", "Swap white bread for whole grain — more fiber and micronutrients for the same calories"],
+  },
+  maintain: {
+    mealTiming: "Keep meals evenly spaced through the day — 3 meals plus a snack works well for most people — and try to eat around the same times daily for steadier energy.",
+    weeklyGoals: [
+      "Stay within your calorie range on 5+ days this week — consistency matters more than any single day",
+      "Try one new healthy recipe — keeps things sustainable long-term",
+      "Get 7+ hours of sleep most nights — supports appetite regulation and recovery",
+    ],
+    groceryRecommendations: ["Seasonal vegetables & fruit", "Lean protein of your choice", "Whole grains", "Greek yogurt", "Nuts & seeds", "Olive oil", "Eggs"],
+    foodsToPrioritize: ["A palm-sized portion of protein each meal — supports satiety and muscle maintenance", "Half your plate as vegetables — fiber and micronutrients with few calories", "Whole over processed foods — more nutrients per calorie", "Consistent hydration — supports energy and digestion"],
+    foodsToReduce: ["Sugary drinks — easy source of extra calories with no nutrition", "Ultra-processed snacks — low in fiber and micronutrients", "Excess added salt — supports better long-term heart health"],
+    restaurantGuide: ["Balance your plate: protein, vegetables, and a modest starch portion", "Order dressings and sauces on the side to control portions", "Share or box half if portions run large"],
+    healthySubstitutions: ["Swap refined grains for whole grains — more fiber, steadier energy", "Swap sugary snacks for fruit + nuts — similar satisfaction, more nutrients", "Swap deep-fried for grilled/roasted — fewer calories, same flavor"],
+  },
+};
+function fallbackNutritionStrategy(p, targets){
+  const base = NUTRITION_STRATEGY_FALLBACKS[p.goal] || NUTRITION_STRATEGY_FALLBACKS.maintain;
+  return Object.assign({}, targets, base, {fallback:true});
+}
+/* Calls the Nutrition Plan Generator (api/chat.js mode:"nutritionPlan") to turn
+   the collected profile into the 13-part strategy. Never throws — on any
+   failure (network, parsing, timeout) it falls back to the deterministic,
+   goal-tailored strategy above so onboarding is never left stuck waiting. */
+async function generateNutritionStrategy(p, plan){
+  const targets = calcNutritionTargets(p, plan);
+  try{
+    const controller = new AbortController();
+    const timeoutId = setTimeout(()=>controller.abort(), 12000);
+    const res = await fetch(`${CHAT_API_BASE}/api/chat`, {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({mode:"nutritionPlan", profile:p, targets}),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if(!res.ok) throw new Error("bad response");
+    const data = await res.json();
+    if(!data.strategy) throw new Error("no strategy");
+    state.nutritionPlan = Object.assign({}, targets, data.strategy, {fallback:false});
+  }catch(e){
+    state.nutritionPlan = fallbackNutritionStrategy(p, targets);
+  }
+}
+function requestNutritionStrategy(){
+  state.nutritionPlanLoading = true;
+  render();
+  generateNutritionStrategy(state.profile, state.plan).then(()=>{
+    state.nutritionPlanLoading = false;
+    render();
+  });
 }
 
 /* scales a meal's calories & macros to a specific target, preserving its
@@ -602,6 +696,8 @@ function loadState(){
       const persist = JSON.parse(raw);
       Object.assign(state, persist);
       if(state.screen==="session") state.screen = "app"; // don't resume mid-session on reload
+      if(state.screen==="generatingPlan") state.screen = "app"; // interrupted mid-generation — profile/plan are already set, just land on the app
+      state.nutritionPlanLoading = false; // never resume a stuck "generating" button state
       if(state.chat && state.chat.messages){
         state.chat.messages = state.chat.messages.filter(m=>!m.pending); // drop any interrupted in-flight request
       }
@@ -637,6 +733,8 @@ function render(){
   const app = document.getElementById("app");
   if(state.screen==="onboarding"){
     app.innerHTML = renderOnboarding();
+  } else if(state.screen==="generatingPlan"){
+    app.innerHTML = renderGeneratingPlan();
   } else if(state.screen==="session"){
     app.innerHTML = renderSessionScreen();
   } else {
@@ -834,9 +932,25 @@ function onboardNext(){
   plan.meals = buildMealPlan(p, plan, null);
   state.plan = plan;
   state.weightLog.push({day:1, weight:p.weight});
-  state.screen="app";
-  state.tab="today";
+  state.screen = "generatingPlan";
   render();
+  generateNutritionStrategy(p, plan).then(()=>{
+    state.screen = "app";
+    state.tab = "today";
+    render();
+  });
+}
+function renderGeneratingPlan(){
+  return `
+  <div class="onboard-wrap">
+    <div class="onboard-card" style="text-align:center;">
+      <div class="spinner-ring"></div>
+      <div class="onboard-header" style="margin-top:18px;">
+        <h1 style="font-size:20px;">Creating your nutrition strategy</h1>
+        <p>Personalizing your calorie, macro, and meal targets...</p>
+      </div>
+    </div>
+  </div>`;
 }
 
 /* ---- onboarding entry chooser: quick form vs. chat/voice with the coach ---- */
@@ -1017,9 +1131,13 @@ function finalizeOnboardChat(){
   plan.meals = buildMealPlan(p, plan, null);
   state.plan = plan;
   state.weightLog.push({day:1, weight:p.weight});
-  state.screen = "app";
-  state.tab = "today";
+  state.screen = "generatingPlan";
   render();
+  generateNutritionStrategy(p, plan).then(()=>{
+    state.screen = "app";
+    state.tab = "today";
+    render();
+  });
 }
 function switchToFormFromChat(){
   const e = state.onboardChat.extracted || {};
@@ -1994,6 +2112,37 @@ function applyRevisedPlan(){
 function dismissInsight(){ state.insightShown = true; render(); }
 
 /* ============================= DIET TAB ============================= */
+function renderNutritionStrategyCard(){
+  const np = state.nutritionPlan;
+  const loading = state.nutritionPlanLoading;
+  const list = (items)=>`<ul class="strategy-list">${(items||[]).map(t=>`<li>${escapeHtml(t)}</li>`).join("")}</ul>`;
+  return `
+    <div class="card">
+      <div class="card-title" style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+        <span>🎯 Your Nutrition Strategy</span>
+        ${np ? `<button class="btn btn-sm btn-round" onclick="requestNutritionStrategy()" ${loading?'disabled':''}>${loading?'Regenerating…':'🔄 Regenerate'}</button>` : ""}
+      </div>
+      ${!np ? `
+        <div class="empty-note" style="margin-bottom:10px;">Get a full personalized strategy — fiber &amp; water targets, meal timing, weekly goals, a grocery list, foods to prioritize/reduce, a restaurant guide, and healthy substitutions, all tailored to your goal.</div>
+        <button class="btn btn-primary btn-round" onclick="requestNutritionStrategy()" ${loading?'disabled':''}>${loading?'Generating…':'Generate my nutrition strategy'}</button>
+      ` : `
+        <div class="grid-2" style="margin:12px 0 16px;">
+          <div class="card" style="background:var(--panel-2);margin:0;"><div class="card-title">Fiber target</div><div class="stat-num" style="font-size:20px;">${np.fiber}g</div></div>
+          <div class="card" style="background:var(--panel-2);margin:0;"><div class="card-title">Water goal</div><div class="stat-num" style="font-size:20px;">${np.water}L</div></div>
+        </div>
+        <div class="field"><label>Meal timing</label><div class="empty-note">${escapeHtml(np.mealTiming||"")}</div></div>
+        <div class="field"><label>Weekly goals</label>${list(np.weeklyGoals)}</div>
+        <div class="field"><label>Grocery recommendations</label>
+          <div class="pill-group">${(np.groceryRecommendations||[]).map(g=>`<span class="pill">${escapeHtml(g)}</span>`).join("")}</div>
+        </div>
+        <div class="field"><label>Foods to prioritize</label>${list(np.foodsToPrioritize)}</div>
+        <div class="field"><label>Foods to reduce</label>${list(np.foodsToReduce)}</div>
+        <div class="field"><label>Restaurant guide</label>${list(np.restaurantGuide)}</div>
+        <div class="field"><label>Healthy substitutions</label>${list(np.healthySubstitutions)}</div>
+        ${np.fallback ? `<div class="empty-note" style="margin-top:6px;">Showing a quick starter strategy — couldn't reach the AI coach just now. Tap Regenerate to try again.</div>` : ""}
+      `}
+    </div>`;
+}
 function renderDietTab(){
   const plan = state.plan;
   return `
@@ -2002,6 +2151,7 @@ function renderDietTab(){
       <div class="card"><div class="card-title">Protein / Carbs / Fat</div><div class="stat-num" style="font-size:20px">${plan.protein}g / ${plan.carbs}g / ${plan.fat}g</div></div>
       <div class="card"><div class="card-title">Maintenance (TDEE)</div><div class="stat-num">${fmt(plan.tdee)}</div></div>
     </div>
+    ${renderNutritionStrategyCard()}
     <div class="card">
       <div class="card-title">This week's meal plan</div>
       ${["breakfast","lunch","dinner","snack"].map(slot=>{

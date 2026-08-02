@@ -176,6 +176,24 @@ pick a simulator/emulator or a plugged-in device and hit Run.
   known, the client shows a plain-language summary of what it understood
   with a "build my plan" button (or "I'd rather fine-tune it myself",
   which drops you into the quick form with everything already filled in).
+- **Nutrition Plan Generator.** Right after onboarding (either path) finishes
+  building the deterministic calorie/macro plan, a brief "Creating your
+  nutrition strategy..." screen calls a dedicated LLM prompt
+  (`mode:"nutritionPlan"` in `api/chat.js`) that turns the profile into a
+  13-part strategy: the calorie/protein/carb/fat/fiber/water targets (fiber
+  and water via standard guideline formulas in `calcNutritionTargets`, and
+  the model is told to report the exact numbers rather than recalculate
+  them — same "never let the LLM invent a number" rule as everywhere else),
+  plus meal timing, weekly goals, grocery recommendations, foods to
+  prioritize/reduce, a restaurant guide, and healthy substitutions — all
+  tailored to the user's specific goal (the prompt has separate
+  prioritization guidance for weight loss, muscle gain, athletic
+  performance, and heart health) and, when known, their lifestyle notes
+  from the onboarding chat. It's shown on the Diet Plan tab
+  (`renderNutritionStrategyCard` in `app.js`) with a "Regenerate" button;
+  if the call fails or times out (12s), a deterministic, goal-tailored
+  fallback strategy (`NUTRITION_STRATEGY_FALLBACKS`) is shown instead so
+  onboarding is never left stuck waiting on a network request.
 - **Real local notifications.** The "we miss you" inactivity nudge now
   schedules a real OS-level notification via
   [`@capacitor/local-notifications`](https://capacitorjs.com/docs/apis/local-notifications)

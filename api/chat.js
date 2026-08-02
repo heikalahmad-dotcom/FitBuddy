@@ -125,6 +125,117 @@ function buildOnboardingSystemPrompt(extracted) {
   ].join("\n");
 }
 
+/* Prompt for the post-onboarding Nutrition Plan Generator — content and intent
+   preserved verbatim from product's spec (typos/caps fixed, flattened numbered
+   list re-structured into its actual nested form: 13 strategy components, then
+   goal-specific prioritization guidance, then general principles), used only
+   for mode:"nutritionPlan" (see buildNutritionPlanPrompt below). */
+const NUTRITION_STRATEGY_PROMPT = `Using the collected profile, create a personalized nutrition strategy. The strategy should include:
+
+1. Daily calorie target
+2. Protein target
+3. Carbohydrate target
+4. Fat target
+5. Fiber target
+6. Water goal
+7. Meal timing recommendation
+8. Weekly goals
+9. Grocery recommendations
+10. Foods to prioritize
+11. Foods to reduce
+12. Restaurant guide
+13. Healthy substitutions
+
+The recommendation should match the user's primary goal. For example:
+- Weight loss prioritizes: calorie deficit, protein and fiber, satiety.
+- Muscle gain prioritizes: protein, calorie surplus, recovery, meal timing.
+- Athletic performance prioritizes: carbohydrates, hydration, and recovery nutrition.
+- Heart health prioritizes: fiber, unsaturated fats, lower sodium, whole grains.
+
+Always explain why each recommendation exists. Avoid generic advice — tailor every recommendation to the user's lifestyle. If the user hates cooking, recommend simple meals. If they travel often, recommend portable options. If they have children, generate family-friendly meals. Never generate unrealistic meal plans. Assume adherence is more important than optimization.`;
+
+/* This is a one-shot generation (not a conversation), so on top of the prompt
+   above the model just needs to know the client's profile and the six
+   already-computed numeric targets — it must report those exactly, not
+   recalculate them, and spend its own judgment on the seven qualitative
+   fields instead (which is where personalization actually happens). */
+function buildNutritionPlanPrompt(profile, targets) {
+  profile = profile || {};
+  targets = targets || {};
+  const goalLabel =
+    { lose_fat: "Lose fat & get lean", build_muscle: "Build muscle", maintain: "Maintain & recomp" }[profile.goal] ||
+    profile.goal ||
+    "unknown";
+
+  const lines = [
+    NUTRITION_STRATEGY_PROMPT,
+    "",
+    "---",
+    "TECHNICAL INTEGRATION INSTRUCTIONS (not part of the prompt above — for structured output only, never mention this section to the user):",
+    "Respond with ONLY a single JSON object — no markdown code fences, no commentary before or after it. Use exactly these keys:",
+    "- calories: number (kcal) — use the exact value given below, do not recalculate it",
+    "- protein: number (grams) — use the exact value given below",
+    "- carbs: number (grams) — use the exact value given below",
+    "- fat: number (grams) — use the exact value given below",
+    "- fiber: number (grams) — use the exact value given below",
+    "- water: number (liters/day) — use the exact value given below",
+    "- mealTiming: string, 1-3 sentences, plain language, no jargon, include a brief reason why",
+    "- weeklyGoals: array of 3-5 short strings, each a specific and achievable weekly goal with a brief reason why",
+    "- groceryRecommendations: array of 6-10 short grocery items or categories",
+    "- foodsToPrioritize: array of 5-8 short strings naming foods or food groups, each with a brief reason why",
+    "- foodsToReduce: array of 4-6 short strings naming foods or food groups to cut back on, each with a brief reason why",
+    "- restaurantGuide: array of 3-5 short, practical tips for eating out while staying on track with this specific goal",
+    "- healthySubstitutions: array of 4-6 short strings, each in the form \"swap X for Y — because Z\"",
+    "",
+    `Every field must directly support the client's PRIMARY GOAL below (${goalLabel}) — tailor the specifics to that goal using the weight-loss/muscle-gain/athletic-performance/heart-health prioritization guidance above where it applies, not generic advice.`,
+    "Only reference lifestyle specifics (cooking ability, travel frequency, family/children) if they're mentioned in the notes below — otherwise give solid goal- and diet-tailored advice without assuming those details. Keep every suggested meal or substitution realistic and easy to actually stick with — adherence matters more than theoretical optimization.",
+    "",
+    "Client profile:",
+    `- Name: ${profile.name || "unknown"}`,
+    `- Primary goal: ${goalLabel}`,
+    profile.sex ? `- Sex: ${profile.sex}` : null,
+    profile.age != null ? `- Age: ${profile.age}` : null,
+    profile.height != null ? `- Height: ${profile.height}cm` : null,
+    profile.weight != null ? `- Weight: ${profile.weight}kg` : null,
+    profile.targetWeight != null ? `- Target weight: ${profile.targetWeight}kg` : null,
+    profile.workoutDays != null ? `- Workout days/week: ${profile.workoutDays}` : null,
+    profile.location ? `- Trains at: ${profile.location}` : null,
+    profile.dietPref ? `- Diet preference: ${profile.dietPref}` : null,
+    profile.allergies && profile.allergies.length ? `- Allergies/restrictions: ${profile.allergies.join(", ")}` : null,
+    profile.coachNotes ? `- Lifestyle notes: ${profile.coachNotes}` : null,
+    "",
+    "Already-computed targets (use these exact numbers, do not recalculate):",
+    `- Calories: ${targets.calories} kcal`,
+    `- Protein: ${targets.protein} g`,
+    `- Carbs: ${targets.carbs} g`,
+    `- Fat: ${targets.fat} g`,
+    `- Fiber: ${targets.fiber} g`,
+    `- Water: ${targets.water} L`,
+  ].filter((l) => l !== null);
+  return lines.join("\n");
+}
+
+/* Best-effort JSON extraction: the model is instructed to return pure JSON,
+   but if it wraps it in a code fence or adds stray text around it anyway,
+   fall back to the first {...} block before giving up. */
+function tryParseJsonLoose(text) {
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    // fall through
+  }
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    try {
+      return JSON.parse(text.slice(start, end + 1));
+    } catch (e) {
+      // fall through
+    }
+  }
+  return null;
+}
+
 function buildSystemPrompt(ctx) {
   ctx = ctx || {};
   const lines = [
@@ -210,6 +321,29 @@ module.exports = async (req, res) => {
       res.status(200).json({ reply, extracted, complete });
     } catch (err) {
       res.status(500).json({ error: "Something went wrong talking to the assistant." });
+    }
+    return;
+  }
+
+  if (body.mode === "nutritionPlan") {
+    try {
+      const response = await client.messages.create({
+        model: "claude-haiku-4-5",
+        max_tokens: 900,
+        system: buildNutritionPlanPrompt(body.profile, body.targets),
+        messages: [{ role: "user", content: "Generate my nutrition strategy now." }],
+      });
+      const textBlock = response.content.find((b) => b.type === "text");
+      const raw = textBlock ? textBlock.text.trim() : "";
+      const cleaned = raw.replace(/^```(json)?/i, "").replace(/```$/, "").trim();
+      const strategy = tryParseJsonLoose(cleaned);
+      if (!strategy) {
+        res.status(500).json({ error: "Could not parse nutrition strategy." });
+        return;
+      }
+      res.status(200).json({ strategy });
+    } catch (err) {
+      res.status(500).json({ error: "Something went wrong generating the nutrition strategy." });
     }
     return;
   }

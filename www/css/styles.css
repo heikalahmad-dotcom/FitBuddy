@@ -398,3 +398,16 @@
   .ob-chat-card{display:flex;flex-direction:column;}
   .ob-chat-messages{max-height:320px;min-height:180px;border:1px solid var(--line);border-radius:14px;background:rgba(0,0,0,0.15);margin-bottom:6px;}
   .ob-chat-summary .step-nav{flex-direction:column;align-items:stretch;}
+
+  /* ---------- Generating-plan loading screen ---------- */
+  .spinner-ring{
+    width:44px;height:44px;border-radius:50%;margin:0 auto;
+    border:3px solid rgba(255,255,255,0.12);border-top-color:var(--amber);
+    animation:spin 0.9s linear infinite;
+  }
+  @keyframes spin{to{transform:rotate(360deg);}}
+
+  /* ---------- Nutrition strategy lists (Diet tab) ---------- */
+  .strategy-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px;}
+  .strategy-list li{font-size:13.5px;color:var(--text-dim);line-height:1.45;padding-left:16px;position:relative;}
+  .strategy-list li::before{content:"•";color:var(--amber);position:absolute;left:2px;}
