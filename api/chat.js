@@ -401,10 +401,30 @@ module.exports = async (req, res) => {
     return;
   }
 
-  const { message, context } = body;
-  if (!message || typeof message !== "string" || message.length > 500) {
-    res.status(400).json({ error: "Invalid message" });
-    return;
+  const { message, context, history } = body;
+
+  // The client now sends the full conversation (history) so follow-up
+  // questions actually have memory of what was just discussed - a bare
+  // single `message` (no history) is still accepted for backward
+  // compatibility, treated as a fresh one-turn conversation.
+  let messages;
+  if (Array.isArray(history) && history.length > 0) {
+    const validHistory =
+      history.length <= 40 &&
+      history.every(
+        (m) => m && (m.role === "user" || m.role === "bot") && typeof m.text === "string" && m.text.length <= 500
+      );
+    if (!validHistory) {
+      res.status(400).json({ error: "Invalid history" });
+      return;
+    }
+    messages = history.map((m) => ({ role: m.role === "bot" ? "assistant" : "user", content: m.text }));
+  } else {
+    if (!message || typeof message !== "string" || message.length > 500) {
+      res.status(400).json({ error: "Invalid message" });
+      return;
+    }
+    messages = [{ role: "user", content: message }];
   }
 
   try {
@@ -412,7 +432,7 @@ module.exports = async (req, res) => {
       model: "claude-haiku-4-5",
       max_tokens: 300,
       system: buildSystemPrompt(context),
-      messages: [{ role: "user", content: message }],
+      messages,
     });
     const textBlock = response.content.find((b) => b.type === "text");
     res.status(200).json({ reply: textBlock ? textBlock.text : "" });

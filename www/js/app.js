@@ -1839,8 +1839,12 @@ function startVoiceInput(session){
   if(micBtn) micBtn.classList.add("listening");
   let finalTranscript = "";
   let silenceTimer = null;
-  const SILENCE_TIMEOUT_MS = 1600; // how long to wait after speech stops before auto-processing — long
-                                    // enough to survive a mid-sentence breath, short enough to feel instant
+  const SILENCE_TIMEOUT_MS = 1600; // how long to wait after speech STARTS before auto-processing a pause —
+                                    // long enough to survive a mid-sentence breath, short enough to feel instant.
+                                    // Deliberately NOT armed until we've actually heard something: waiting for
+                                    // the user to start talking (right after the mic opens, or while they're
+                                    // still reading/thinking about a reply) can easily take longer than that,
+                                    // and this used to silently end the hands-free loop with nothing to submit.
   const resetSilenceTimer = ()=>{
     clearTimeout(silenceTimer);
     silenceTimer = setTimeout(()=>{
@@ -1855,20 +1859,27 @@ function startVoiceInput(session){
       else interim += piece;
     }
     if(session.onInterim) session.onInterim((finalTranscript + interim).trim());
-    resetSilenceTimer(); // still hearing them — push the auto-stop back out
+    resetSilenceTimer(); // heard something — (re)start the mid-pause timer
   };
   const finish = ()=>{
     clearTimeout(silenceTimer);
-    __voiceInputActive = false;
-    if(micBtn) micBtn.classList.remove("listening");
     if(__activeRecognition===recognition) __activeRecognition = null;
     const transcript = finalTranscript.trim();
-    if(!__voiceInputCancelled && transcript) session.onTranscript(transcript);
+    if(__voiceInputCancelled || transcript || __voiceInputFinishing){
+      __voiceInputActive = false;
+      if(micBtn) micBtn.classList.remove("listening");
+      if(!__voiceInputCancelled && transcript) session.onTranscript(transcript);
+      return;
+    }
+    // nothing was heard and nobody asked to stop — most likely the browser's
+    // own no-speech timeout fired before the user started talking; keep
+    // listening instead of silently dropping the hands-free loop
+    __voiceInputActive = false;
+    startVoiceInput(session);
   };
   recognition.onerror = finish;
   recognition.onend = finish;
   recognition.start();
-  resetSilenceTimer(); // also auto-stop if they never say anything at all
 }
 /* native speech-to-text via @capacitor-community/speech-recognition (iOS/Android).
    Its start() always ends after one short utterance — there's no continuous/
@@ -1899,8 +1910,11 @@ async function startVoiceInputNative(session){
     while(!__voiceInputCancelled && !__voiceInputFinishing){
       const result = await SR.start({language:"en-GB", maxResults:1, partialResults:true, popup:false});
       const piece = result && result.matches && result.matches[0];
-      if(!piece) break; // no speech captured this round — stop chaining rather than loop silently forever
-      finalTranscript = (finalTranscript + " " + piece).trim();
+      if(piece) finalTranscript = (finalTranscript + " " + piece).trim();
+      // if no speech was captured this round, just loop and try again instead
+      // of ending the session — the user may just not have started talking
+      // yet (right after the mic opens, or while reading a reply), and each
+      // real round takes real audio-capture time, so this can't spin tightly
     }
   }catch(e){ /* permission denied or recognition error — no-op */
   }finally{
@@ -1967,7 +1981,7 @@ function sendChat(){
   }
   state.chat.messages.push({role:"bot", text:"", pending:true});
   updateChatWidget();
-  fetchLlmReply(text);
+  fetchLlmReply();
 }
 
 /* ---- chat: every question goes to the LLM, grounded with a snapshot of the
@@ -1998,12 +2012,13 @@ function replacePendingBotMessage(text){
   updateChatWidget();
   speakText(text, state.chat.voiceOutput, continueVoiceConversation);
 }
-async function fetchLlmReply(userText){
+async function fetchLlmReply(){
   try{
+    const history = state.chat.messages.filter(m=>!m.pending).map(m=>({role:m.role, text:m.text}));
     const res = await fetch(`${CHAT_API_BASE}/api/chat`, {
       method: "POST",
       headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({message:userText, context:buildChatContext()}),
+      body: JSON.stringify({history, context:buildChatContext()}),
     });
     if(!res.ok) throw new Error("bad response");
     const data = await res.json();
