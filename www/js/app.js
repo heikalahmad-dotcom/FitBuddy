@@ -275,6 +275,7 @@ let state = {
   plan: null, // {calories, protein, carbs, fat, meals:{breakfast,lunch,dinner,snack}, workoutDays}
   nutritionPlan: null, // {calories,protein,carbs,fat,fiber,water,mealTiming,weeklyGoals,groceryRecommendations,foodsToPrioritize,foodsToReduce,restaurantGuide,healthySubstitutions,fallback}
   nutritionPlanLoading: false,
+  customMealPlan: null, // {meals:{breakfast,lunch,dinner,snack}, expiresDay} — user-defined override; auto-reverts to state.plan.meals once state.today > expiresDay
   today: 1, // simulated day counter
   weightLog: [], // {day, weight}
   logs: {}, // day -> {meals:[{slot,name,cal,extra,unhealthy}], workoutDone:bool, setsDone:{exIdx:[bool,...]}}
@@ -300,6 +301,17 @@ let state = {
 function todayLog(){
   if(!state.logs[state.today]) state.logs[state.today] = {meals:[], workoutDone:false, setsDone:{}, overageNudgeShown:false};
   return state.logs[state.today];
+}
+
+/* ---- custom meal plan override: a user-defined set of meals that replaces
+   the app's own selection for a fixed number of days, then auto-reverts.
+   state.plan.meals (the algorithmic selection) is never overwritten, so
+   reverting is just "stop reading from the override" once it expires. ---- */
+function isCustomMealPlanActive(){
+  return !!(state.customMealPlan && state.today <= state.customMealPlan.expiresDay);
+}
+function activeMeals(){
+  return isCustomMealPlanActive() ? state.customMealPlan.meals : state.plan.meals;
 }
 
 /* shows once per day, the moment logged calories first cross the daily target */
@@ -1316,11 +1328,13 @@ function renderToday(){
     </div>
 
     <div class="card-title" style="margin:4px 0 10px;">Today's meals</div>
+    ${renderCustomMealPlanBanner()}
     ${order.map(slot=>renderTodayMealRow(slot, slot===nextSlot)).join("")}
     ${log.meals.map((m,i)=>({...m,_idx:i})).filter(m=>m.extra).map(m=>renderExtraMealRow(m)).join("")}
     <div style="margin:2px 0 20px;display:flex;gap:8px;flex-wrap:wrap;">
       <button class="btn btn-sm btn-round" onclick="openModal('logExtra')">+ Log something else I ate</button>
       <button class="btn btn-sm btn-round" onclick="openModal('snapPhoto')">📷 Snap a meal photo</button>
+      ${isCustomMealPlanActive() ? "" : `<button class="btn btn-sm btn-round" onclick="openCustomMealPlanModal()">✏️ Use my own meals for a while</button>`}
     </div>
 
     <div class="card">
@@ -1395,8 +1409,9 @@ function isExerciseDone(idx){
 function renderTodayMealRow(slot, isNext){
   const log = todayLog();
   const entry = log.meals.find(m=>m.slot===slot && !m.extra);
-  const meal = state.plan.meals[slot];
+  const meal = activeMeals()[slot];
   const done = !!entry;
+  const custom = isCustomMealPlanActive();
   return `
     <div class="meal-card ${isNext && !done ? 'highlight':''}" onclick="toggleMealDone('${slot}')" style="cursor:pointer;${done?'opacity:.6;':''}">
       ${isNext && !done ? `<div class="refresh-badge">↻</div>` : ""}
@@ -1407,7 +1422,7 @@ function renderTodayMealRow(slot, isNext){
           <div class="meal-sub">${slot.charAt(0).toUpperCase()+slot.slice(1)} · ${meal.cal} kcal · P${meal.p}/C${meal.c}/F${meal.f}</div>
         </div>
       </div>
-      <button class="pill-btn" onclick="event.stopPropagation();openModal('swap','${slot}')">Swap</button>
+      ${custom ? "" : `<button class="pill-btn" onclick="event.stopPropagation();openModal('swap','${slot}')">Swap</button>`}
     </div>`;
 }
 
@@ -1434,7 +1449,7 @@ function toggleMealDone(slot){
   const idx = log.meals.findIndex(m=>m.slot===slot && !m.extra);
   if(idx>=0){ log.meals.splice(idx,1); }
   else {
-    const meal = state.plan.meals[slot];
+    const meal = activeMeals()[slot];
     log.meals.push({slot, name:meal.name, cal:meal.cal, p:meal.p, c:meal.c, f:meal.f, extra:false, unhealthy:false});
     markActivityToday();
     maybeCalorieOverageNudge();
@@ -2008,8 +2023,14 @@ function doSwap(slot){
 function updateExtraEstimate(){
   if(!state.modal) return;
   const nameEl = document.getElementById('extra-name');
-  const weightEl = document.getElementById('extra-weight');
   state.modal.name = nameEl ? nameEl.value : "";
+  if(state.modal.voiceMacros){
+    // a voice estimate already covers calories+macros (there's no weight
+    // field in that mode) — editing the name shouldn't wipe it out
+    render();
+    return;
+  }
+  const weightEl = document.getElementById('extra-weight');
   state.modal.weight = weightEl ? weightEl.value : "";
   const weightNum = +state.modal.weight;
   state.modal.estimate = (state.modal.name.trim() && weightNum>0) ? estimateCaloriesForFood(state.modal.name, weightNum) : null;
@@ -2019,12 +2040,64 @@ function submitExtra(name, cal){
   if(!name || !cal) return;
   const lower = name.toLowerCase();
   const unhealthy = UNHEALTHY_KEYWORDS.some(k=>lower.includes(k));
-  const macros = estimateMacrosForCalories(name, cal);
+  const macros = (state.modal && state.modal.voiceMacros) ? state.modal.voiceMacros : estimateMacrosForCalories(name, cal);
   const log = todayLog();
   log.meals.push({slot:"extra", name, cal:+cal, p:macros.p, c:macros.c, f:macros.f, extra:true, unhealthy});
   markActivityToday();
   closeModal();
   maybeCalorieOverageNudge();
+  render();
+}
+
+/* ---- speak your meal: parses a spoken description via the Nutrition
+   estimation LLM (mode:"mealLog") instead of requiring a typed name+weight.
+   Reuses the same shared mic engine as the chat surfaces. ---- */
+function mealVoiceSession(){
+  return {
+    micBtnId: "meal-voice-mic-btn",
+    onInterim:(t)=>{
+      const el = document.getElementById("meal-voice-transcript");
+      if(el) el.textContent = t;
+    },
+    onTranscript:(t)=>{ submitSpokenMeal(t); },
+  };
+}
+async function submitSpokenMeal(transcript){
+  if(!state.modal || state.modal.type!=="logExtra") return;
+  state.modal.voiceTranscript = transcript;
+  state.modal.voiceLoading = true;
+  state.modal.voiceError = false;
+  render();
+  try{
+    const res = await fetch(`${CHAT_API_BASE}/api/chat`, {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({mode:"mealLog", transcript}),
+    });
+    if(!res.ok) throw new Error("bad response");
+    const data = await res.json();
+    if(!data.estimate) throw new Error("no estimate");
+    if(!state.modal || state.modal.type!=="logExtra") return; // modal closed while we were waiting
+    state.modal.name = data.estimate.name || transcript;
+    state.modal.estimate = Math.round(data.estimate.calories) || null;
+    state.modal.voiceMacros = {
+      p: Math.round(data.estimate.protein)||0,
+      c: Math.round(data.estimate.carbs)||0,
+      f: Math.round(data.estimate.fat)||0,
+    };
+  }catch(e){
+    if(!state.modal || state.modal.type!=="logExtra") return;
+    state.modal.voiceError = true;
+  }
+  state.modal.voiceLoading = false;
+  render();
+}
+function clearVoiceMealEstimate(){
+  if(!state.modal) return;
+  state.modal.voiceMacros = null;
+  state.modal.estimate = null;
+  state.modal.voiceTranscript = null;
+  state.modal.voiceError = false;
   render();
 }
 
@@ -2143,8 +2216,23 @@ function renderNutritionStrategyCard(){
       `}
     </div>`;
 }
+function renderCustomMealPlanBanner(){
+  if(!isCustomMealPlanActive()) return "";
+  const daysLeft = state.customMealPlan.expiresDay - state.today + 1;
+  return `
+    <div class="banner" style="margin-bottom:14px;">
+      <div class="banner-icon">🍽️</div>
+      <div>
+        <div class="banner-title">Your own meal plan is active</div>
+        <div class="banner-text">${daysLeft} day${daysLeft===1?"":"s"} left, then you'll automatically go back to your personalized FitBuddy meal plan.</div>
+        <div style="margin-top:10px;"><button class="btn btn-sm btn-round" onclick="endCustomMealPlanNow()">End it now</button></div>
+      </div>
+    </div>`;
+}
 function renderDietTab(){
   const plan = state.plan;
+  const meals = activeMeals();
+  const custom = isCustomMealPlanActive();
   return `
     <div class="grid-3">
       <div class="card"><div class="card-title">Daily calories</div><div class="stat-num">${fmt(plan.calories)}</div></div>
@@ -2152,10 +2240,11 @@ function renderDietTab(){
       <div class="card"><div class="card-title">Maintenance (TDEE)</div><div class="stat-num">${fmt(plan.tdee)}</div></div>
     </div>
     ${renderNutritionStrategyCard()}
+    ${renderCustomMealPlanBanner()}
     <div class="card">
-      <div class="card-title">This week's meal plan</div>
+      <div class="card-title">${custom?"Your custom meal plan":"This week's meal plan"}</div>
       ${["breakfast","lunch","dinner","snack"].map(slot=>{
-        const m = plan.meals[slot];
+        const m = meals[slot];
         return `
         <div class="ledger-row">
           <div class="ledger-main">
@@ -2165,10 +2254,13 @@ function renderDietTab(){
               <div class="ledger-sub">${slot.charAt(0).toUpperCase()+slot.slice(1)} · ${m.cal} kcal · P${m.p}/C${m.c}/F${m.f}</div>
             </div>
           </div>
-          <div class="ledger-actions"><button class="btn btn-sm btn-round" onclick="openModal('swap','${slot}')">Swap</button></div>
+          ${custom ? "" : `<div class="ledger-actions"><button class="btn btn-sm btn-round" onclick="openModal('swap','${slot}')">Swap</button></div>`}
         </div>`;
       }).join("")}
-      <div class="empty-note">Don't like something? Tap Swap and we'll pick a nutritionally similar alternative.</div>
+      ${custom
+        ? `<div class="empty-note">This is your own plan — tap "End it now" above to go back to Swap-able suggestions early.</div>`
+        : `<div class="empty-note">Don't like something? Tap Swap and we'll pick a nutritionally similar alternative.</div>
+           <div style="margin-top:10px;"><button class="btn btn-sm btn-round" onclick="openCustomMealPlanModal()">✏️ Use my own meals for a while</button></div>`}
     </div>
   `;
 }
@@ -2404,6 +2496,10 @@ function openModal(type, arg){
 }
 function closeModal(){
   document.querySelectorAll(".modal-overlay").forEach(el=>el.remove());
+  // only cancel voice input if THIS modal was the one using the mic — the
+  // shared engine is global, and some other modal could pop up over an
+  // unrelated in-progress hands-free chat session
+  if(state.modal && state.modal.type==="logExtra") stopVoiceInput();
   state.modal = null;
 }
 
@@ -2456,12 +2552,22 @@ function renderModal(){
       <button class="btn btn-primary btn-block" style="margin-top:14px;" onclick="closeModal();render()">Got it</button>
     `;
   } else if(m.type==="logExtra"){
+    const hasSpeechInput = hasNativeSpeechInput() || !!(window.SpeechRecognition || window.webkitSpeechRecognition);
     inner = `
       <div class="modal-head"><h3>Log something else</h3><button class="x-btn" onclick="closeModal();render()">✕</button></div>
+      ${hasSpeechInput ? `
+        <div class="field" style="text-align:center;">
+          <button id="meal-voice-mic-btn" class="chat-mic" style="width:52px;height:52px;font-size:20px;" onclick="startVoiceInput(mealVoiceSession())" aria-label="Speak what you ate">🎤</button>
+          <div class="empty-note" id="meal-voice-transcript" style="margin-top:8px;min-height:16px;">${m.voiceTranscript?escapeHtml(m.voiceTranscript):"Tap the mic and tell us what you ate"}</div>
+        </div>
+        ${m.voiceLoading ? `<div class="empty-note" style="text-align:center;">Figuring out the calories...</div>` : ""}
+        ${m.voiceError ? `<div class="empty-note" style="text-align:center;color:var(--amber);">Couldn't estimate that — try again, or type it in below.</div>` : ""}
+        <div class="empty-note" style="text-align:center;">or type it in below</div>
+      ` : ""}
       <div class="field"><label>What did you have?</label><input id="extra-name" type="text" placeholder="e.g. grilled chicken breast" value="${m.name||''}" oninput="updateExtraEstimate()"></div>
-      <div class="field"><label>Weight (grams)</label><input id="extra-weight" type="number" placeholder="e.g. 150" value="${m.weight||''}" oninput="updateExtraEstimate()"></div>
+      ${!m.voiceMacros ? `<div class="field"><label>Weight (grams)</label><input id="extra-weight" type="number" placeholder="e.g. 150" value="${m.weight||''}" oninput="updateExtraEstimate()"></div>` : ""}
       ${m.estimate ? `
-        <div class="empty-note">Estimated: <span class="mono" style="color:var(--amber)">${m.estimate} kcal</span> (auto-estimate — feel free to adjust)</div>
+        <div class="empty-note">Estimated: <span class="mono" style="color:var(--amber)">${m.estimate} kcal</span> (auto-estimate — feel free to adjust)${m.voiceMacros?` · <a href="#" onclick="event.preventDefault();clearVoiceMealEstimate()" style="color:var(--text-dim);">clear &amp; enter manually</a>`:""}</div>
         <div class="field"><label>Calories</label><input id="extra-cal" type="number" value="${m.estimate}"></div>
         <button class="btn btn-primary btn-block" onclick="submitExtra(document.getElementById('extra-name').value, document.getElementById('extra-cal').value)">Log it</button>`
         : `<div class="empty-note">Enter what you ate and its weight, and we'll estimate the calories for you.</div>`}
@@ -2533,8 +2639,83 @@ function renderModal(){
       </div>
       <button class="btn btn-primary btn-round btn-block" style="margin-top:14px;" onclick="closeModal();render()">Let's get back on track</button>
     `;
+  } else if(m.type==="customMealPlan"){
+    const order = ["breakfast","lunch","dinner","snack"];
+    const slots = m.slots || {};
+    const allSlotsReady = order.every(s=>slots[s] && slots[s].name && slots[s].name.trim() && slots[s].estimate);
+    const canStart = allSlotsReady && !!m.duration;
+    inner = `
+      <div class="modal-head"><h3>Use your own meals</h3><button class="x-btn" onclick="closeModal();render()">✕</button></div>
+      <div class="empty-note">Tell us what you'll eat for each meal and we'll estimate the calories. Your own plan replaces our suggestions until the duration ends — then you're automatically back on your personalized plan.</div>
+      ${order.map(slot=>{
+        const s = slots[slot] || {};
+        return `
+        <div class="field">
+          <label>${slot.charAt(0).toUpperCase()+slot.slice(1)}</label>
+          <div class="grid-2">
+            <input id="cmp-${slot}-name" type="text" placeholder="What will you eat?" value="${s.name||''}" oninput="updateCustomMealSlot('${slot}')">
+            <input id="cmp-${slot}-weight" type="number" placeholder="Weight (g)" value="${s.weight||''}" oninput="updateCustomMealSlot('${slot}')">
+          </div>
+          ${s.estimate ? `<div class="empty-note" style="padding-top:4px;">~${s.estimate} kcal</div>` : ""}
+        </div>`;
+      }).join("")}
+      <div class="field">
+        <label>How long should this run?</label>
+        <div class="pill-group">
+          ${[[3,"3 days"],[7,"1 week"],[14,"2 weeks"]].map(([d,l])=>`<button class="pill ${m.duration===d?'selected':''}" onclick="setCustomPlanDuration(${d})">${l}</button>`).join("")}
+        </div>
+      </div>
+      <button class="btn btn-primary btn-block" style="${canStart?'':'opacity:.4;'}" ${canStart?'':'disabled'} onclick="startCustomMealPlan()">Start my custom plan</button>
+    `;
+  } else if(m.type==="customPlanEnded"){
+    inner = `
+      <div class="modal-head"><h3>🍽️ Custom plan ended</h3><button class="x-btn" onclick="closeModal();render()">✕</button></div>
+      <div class="banner" style="margin:0;"><div class="banner-icon">↩️</div><div><div class="banner-text">Your custom meal plan has ended — you're back on your personalized FitBuddy meal plan.</div></div></div>
+      <button class="btn btn-primary btn-block" style="margin-top:14px;" onclick="closeModal();render()">Got it</button>
+    `;
   }
   return `<div class="modal-overlay" onclick="if(event.target===this){closeModal();render();}"><div class="modal">${inner}</div></div>`;
+}
+
+/* ---- custom meal plan: define + start/end ---- */
+function openCustomMealPlanModal(){
+  state.modal = {type:"customMealPlan", slots:{breakfast:{}, lunch:{}, dinner:{}, snack:{}}, duration:null};
+  render();
+}
+function updateCustomMealSlot(slot){
+  if(!state.modal) return;
+  const nameEl = document.getElementById(`cmp-${slot}-name`);
+  const weightEl = document.getElementById(`cmp-${slot}-weight`);
+  const name = nameEl ? nameEl.value : "";
+  const weight = weightEl ? weightEl.value : "";
+  const weightNum = +weight;
+  const estimate = (name.trim() && weightNum>0) ? estimateCaloriesForFood(name, weightNum) : null;
+  state.modal.slots[slot] = {name, weight, estimate};
+  render();
+}
+function setCustomPlanDuration(days){
+  if(!state.modal) return;
+  state.modal.duration = days;
+  render();
+}
+function startCustomMealPlan(){
+  const m = state.modal;
+  if(!m || m.type!=="customMealPlan" || !m.duration) return;
+  const order = ["breakfast","lunch","dinner","snack"];
+  if(!order.every(s=>m.slots[s] && m.slots[s].name && m.slots[s].name.trim() && m.slots[s].estimate)) return;
+  const meals = {};
+  order.forEach(s=>{
+    const slot = m.slots[s];
+    const macros = estimateMacrosForCalories(slot.name, slot.estimate);
+    meals[s] = {name:slot.name.trim(), cal:slot.estimate, p:macros.p, c:macros.c, f:macros.f};
+  });
+  state.customMealPlan = {meals, expiresDay: state.today + m.duration - 1};
+  closeModal();
+  render();
+}
+function endCustomMealPlanNow(){
+  state.customMealPlan = null;
+  render();
 }
 
 /* ============================= DEMO CONTROLS ============================= */
@@ -2551,7 +2732,13 @@ function renderDemoControls(){
 function advanceDay(){
   state.today += 1;
   state.insightShown = false;
-  checkInactivityNudge();
+  let planJustEnded = false;
+  if(state.customMealPlan && state.today > state.customMealPlan.expiresDay){
+    state.customMealPlan = null;
+    state.modal = {type:"customPlanEnded"};
+    planJustEnded = true;
+  }
+  if(!planJustEnded) checkInactivityNudge();
   render();
 }
 function backDay(){

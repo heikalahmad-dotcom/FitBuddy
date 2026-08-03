@@ -236,6 +236,20 @@ function tryParseJsonLoose(text) {
   return null;
 }
 
+/* Used for mode:"mealLog" — turns a spoken (or typed) free-form meal
+   description into a structured calorie/macro estimate, letting a user
+   just say what they ate instead of typing a food name + weighing it. */
+const MEAL_LOG_PROMPT = `You are a nutrition estimation assistant. The user will describe, in their own words, a meal or food they just ate — often spoken aloud, so it may be casual or run-on. Identify what they ate and estimate realistic total calories and macros for the full portion described, using typical serving sizes when they don't give exact amounts.
+
+Respond with ONLY a single JSON object — no markdown code fences, no commentary before or after it. Use exactly these keys:
+- name: a short, clean label for what they ate (e.g. "Turkey sandwich & side salad"), max 60 characters
+- calories: integer, kcal, for the whole thing they described
+- protein: integer, grams
+- carbs: integer, grams
+- fat: integer, grams
+
+Always return your best realistic estimate, even for vague descriptions — never ask a follow-up question, never refuse, never return placeholder or zero values.`;
+
 function buildSystemPrompt(ctx) {
   ctx = ctx || {};
   const lines = [
@@ -321,6 +335,34 @@ module.exports = async (req, res) => {
       res.status(200).json({ reply, extracted, complete });
     } catch (err) {
       res.status(500).json({ error: "Something went wrong talking to the assistant." });
+    }
+    return;
+  }
+
+  if (body.mode === "mealLog") {
+    const transcript = body.transcript;
+    if (!transcript || typeof transcript !== "string" || transcript.length > 300) {
+      res.status(400).json({ error: "Invalid transcript" });
+      return;
+    }
+    try {
+      const response = await client.messages.create({
+        model: "claude-haiku-4-5",
+        max_tokens: 200,
+        system: MEAL_LOG_PROMPT,
+        messages: [{ role: "user", content: transcript }],
+      });
+      const textBlock = response.content.find((b) => b.type === "text");
+      const raw = textBlock ? textBlock.text.trim() : "";
+      const cleaned = raw.replace(/^```(json)?/i, "").replace(/```$/, "").trim();
+      const estimate = tryParseJsonLoose(cleaned);
+      if (!estimate) {
+        res.status(500).json({ error: "Could not parse meal estimate." });
+        return;
+      }
+      res.status(200).json({ estimate });
+    } catch (err) {
+      res.status(500).json({ error: "Something went wrong estimating that meal." });
     }
     return;
   }

@@ -207,6 +207,22 @@ pick a simulator/emulator or a plugged-in device and hit Run.
   when running as the packaged native app (see `takeMealPhoto` in
   `app.js`), instead of the system file picker. In a plain browser it still
   falls back to the file input for local dev/testing.
+- **Speak a meal to log it.** The "Log something else I ate" modal now has
+  a 🎤 button alongside typing — say what you ate (e.g. "a turkey sandwich
+  and a side salad") and it's sent to a dedicated LLM prompt
+  (`mode:"mealLog"` in `api/chat.js`) that estimates calories and macros
+  for the whole thing (no weighing required, unlike the typed flow), then
+  pre-fills the same review screen you'd get from typing or a photo — you
+  still confirm with "Log it" before anything is recorded.
+- **Custom meal plan override.** From Today or Diet Plan, "✏️ Use my own
+  meals for a while" lets you define your own breakfast/lunch/dinner/snack
+  (weight-based, same estimator as logging extras) for a set number of
+  days. While it's active it fully replaces FitBuddy's own meal selection
+  (Swap is hidden — it's your plan now) and a banner shows the days
+  remaining with an "End it now" option; the algorithmic plan
+  (`state.plan.meals`) is never touched, so once the duration elapses
+  (`advanceDay` in `app.js`) it automatically reverts with a one-time
+  notice, no regeneration needed.
 - **Voice in the chat assistant, hands-free.** Opening the chat (tapping 💬)
   automatically starts listening — no need to tap the mic or say a wake
   phrase first. After each reply, it automatically starts listening again
