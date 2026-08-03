@@ -123,6 +123,63 @@ endpoint bounded only by a per-message length cap and `max_tokens`. Fine
 for personal/small-scale use; if this app gets real traffic, add a proper
 rate limiter (e.g. Vercel KV/Upstash) before that becomes a cost risk.
 
+## Required: Supabase project (customer accounts, subscriptions, images)
+
+FitBuddy is moving from local-only (`localStorage`) state to a real backend
+for customer accounts, subscription/billing state, and photo storage. This
+is Supabase — Postgres for the relational data, plus its built-in Auth and
+Storage, all in one project. The schema lives in
+[`supabase/migrations/0001_init_schema.sql`](supabase/migrations/0001_init_schema.sql).
+
+**One-time setup (do this yourself — account/project creation needs your own
+credentials, not something this assistant can do on your behalf):**
+
+1. Create a free project at [supabase.com](https://supabase.com) (sign up,
+   then "New project" — pick any name/region, set a database password and
+   save it somewhere safe).
+2. Once it's provisioned, open **SQL Editor** in the left sidebar, paste in
+   the full contents of `supabase/migrations/0001_init_schema.sql`, and hit
+   **Run**. This creates the `profiles`, `subscription_plans`,
+   `subscriptions`, `subscription_events`, and `user_images` tables (with
+   Row Level Security policies scoping every row to its owner) plus two
+   private Storage buckets (`meal-photos`, `progress-photos`).
+3. Open **Project Settings → API** and copy three values:
+   - **Project URL**
+   - **anon / public key** — safe to ship to the client; RLS is what
+     actually protects the data, not keeping this secret
+   - **service_role key** — **secret**, server-side only. It bypasses RLS
+     entirely, so it must only ever be used from `api/*.js` (Vercel
+     serverless functions), never from `www/` or committed to the repo.
+4. Set them in your Vercel project — **Project Settings → Environment
+   Variables**:
+
+```
+SUPABASE_URL = <project URL>
+SUPABASE_ANON_KEY = <anon/public key>
+SUPABASE_SERVICE_ROLE_KEY = <service_role key>
+```
+
+Once these exist, share that they're set (not the values) and the app-side
+integration (auth UI, wiring `www/js/app.js` off `localStorage` and onto
+Supabase, subscription webhook handling) can proceed.
+
+**Design notes**, for when you're reading the schema:
+- There's no hand-rolled `users` table — Supabase's own `auth.users` (managed
+  by GoTrue) handles accounts, password hashing, OAuth, and email
+  verification. Every app table references `auth.users(id)` directly.
+- `subscriptions` has no insert/update policy for regular users on purpose —
+  billing state should only ever be written server-side (via a webhook
+  handler using the service_role key) once Stripe/Apple/Google payment
+  integration exists, never directly from the client.
+- `user_images` stores metadata + a Storage object path only, never image
+  bytes — the buckets are private, so displaying a photo means generating a
+  short-lived signed URL server-side, not linking to it directly.
+- Since this ships as an iOS/Android app via Capacitor, recurring
+  subscriptions bought *inside* the app generally have to go through
+  Apple/Google's own in-app purchase systems, not a direct Stripe charge —
+  that's why `subscriptions.provider` is `'stripe' | 'apple' | 'google'`
+  rather than assuming one payment processor.
+
 ## Whenever you edit www/ (html/css/js)
 
 Any time you or I change files inside `www/`, sync those changes into the
