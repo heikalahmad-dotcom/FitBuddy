@@ -1838,6 +1838,15 @@ function startVoiceInput(session){
   recognition.maxAlternatives = 1;
   if(micBtn) micBtn.classList.add("listening");
   let finalTranscript = "";
+  let silenceTimer = null;
+  const SILENCE_TIMEOUT_MS = 1600; // how long to wait after speech stops before auto-processing — long
+                                    // enough to survive a mid-sentence breath, short enough to feel instant
+  const resetSilenceTimer = ()=>{
+    clearTimeout(silenceTimer);
+    silenceTimer = setTimeout(()=>{
+      try{ recognition.stop(); }catch(e){ /* already stopped */ }
+    }, SILENCE_TIMEOUT_MS);
+  };
   recognition.onresult = (e)=>{
     let interim = "";
     for(let i=e.resultIndex; i<e.results.length; i++){
@@ -1846,8 +1855,10 @@ function startVoiceInput(session){
       else interim += piece;
     }
     if(session.onInterim) session.onInterim((finalTranscript + interim).trim());
+    resetSilenceTimer(); // still hearing them — push the auto-stop back out
   };
   const finish = ()=>{
+    clearTimeout(silenceTimer);
     __voiceInputActive = false;
     if(micBtn) micBtn.classList.remove("listening");
     if(__activeRecognition===recognition) __activeRecognition = null;
@@ -1857,6 +1868,7 @@ function startVoiceInput(session){
   recognition.onerror = finish;
   recognition.onend = finish;
   recognition.start();
+  resetSilenceTimer(); // also auto-stop if they never say anything at all
 }
 /* native speech-to-text via @capacitor-community/speech-recognition (iOS/Android).
    Its start() always ends after one short utterance — there's no continuous/
