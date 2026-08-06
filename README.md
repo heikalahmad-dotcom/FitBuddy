@@ -280,6 +280,24 @@ pick a simulator/emulator or a plugged-in device and hit Run.
   (`state.plan.meals`) is never touched, so once the duration elapses
   (`advanceDay` in `app.js`) it automatically reverts with a one-time
   notice, no regeneration needed.
+- **Weekly rebalance agent.** Roughly once a week (`maybeRebalanceCheck`,
+  triggered opportunistically off `advanceDay`/a fresh weigh-in — there's no
+  server-side cron yet), `evaluateRebalance` in `app.js` looks at the
+  trailing week's weight trend against the goal's target pace, plus meal-
+  logging and workout-completion adherence, and decides — fully
+  deterministically, no LLM — whether the plan needs a nudge: tighten
+  calories (and add a cardio session, for a fat-loss goal) if progress is
+  too slow but the plan is actually being followed; loosen calories if
+  progress is unsafely fast; leave the numbers alone and just encourage
+  consistency if adherence itself is the real issue, since tightening a
+  plan nobody's following would only make things worse. Every adjustment is
+  clamped to a safe calorie floor. `api/chat.js`'s `mode:"rebalance"` is
+  used *only* to turn that already-decided change into a short, encouraging
+  explanation in the coach's voice — the model never sees enough to invent
+  a different number, and the recommendation modal shows a deterministic
+  fallback explanation instantly, upgrading in place if the LLM version
+  arrives before it's dismissed. Replaces the old, cruder `offTrack` check
+  (lifetime-average pace, flat ±150kcal, no adherence awareness, no cardio).
 - **Voice in the chat assistant, hands-free.** Opening the chat (tapping 💬)
   automatically starts listening — no need to tap the mic or say a wake
   phrase first. After each reply, it automatically starts listening again

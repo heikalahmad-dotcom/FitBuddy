@@ -250,6 +250,45 @@ Respond with ONLY a single JSON object — no markdown code fences, no commentar
 
 Always return your best realistic estimate, even for vague descriptions — never ask a follow-up question, never refuse, never return placeholder or zero values.`;
 
+/* Used for mode:"rebalance" — the weekly rebalance agent (evaluateRebalance
+   in www/js/app.js) decides ALL the numbers itself (calorie adjustment,
+   whether to add cardio) with zero LLM involvement; this call only turns
+   that already-made decision into a short, encouraging explanation. The
+   model never sees enough to invent a different number even if it wanted to. */
+const REBALANCE_PROMPT = `You are a professional fitness and nutrition coach explaining a small automatic adjustment to a client's plan, made after a weekly progress check-in. Explain WHY this specific change makes sense in 1-3 short sentences, like a real chat message — warm and encouraging, never shaming or judgmental, framed as normal course-correction rather than a failure. Only reference the numbers given to you below — never invent or estimate one you weren't given.`;
+
+function buildRebalancePrompt(profile, decision) {
+  profile = profile || {};
+  decision = decision || {};
+  const goalLabel =
+    { lose_fat: "Lose fat & get lean", build_muscle: "Build muscle", maintain: "Maintain & recomp" }[profile.goal] ||
+    profile.goal ||
+    "unknown";
+  const lines = [
+    REBALANCE_PROMPT,
+    "",
+    "Respond with ONLY a single JSON object — no markdown code fences, no commentary. Use exactly this key:",
+    "- explanation: string, 1-3 short sentences",
+    "",
+    `Client goal: ${goalLabel}`,
+    `Reason for this check-in: ${decision.reason}`,
+  ];
+  if (decision.actualRate != null) lines.push(`- Actual rate of change: ${Number(decision.actualRate).toFixed(2)} kg/week`);
+  if (decision.targetRate != null) lines.push(`- Target rate: ${decision.targetRate} kg/week`);
+  if (decision.calorieAdjustment) {
+    lines.push(`- Calorie adjustment: ${decision.calorieAdjustment > 0 ? "+" : ""}${decision.calorieAdjustment} kcal/day (new target: ${decision.newCalories} kcal)`);
+  }
+  if (decision.addCardio && decision.cardio) {
+    lines.push(`- Adding cardio: ${decision.cardio.name} (${decision.cardio.scheme})`);
+  }
+  if (decision.reason === "low_adherence" && decision.adherence) {
+    lines.push(
+      `- No numeric changes this week — the focus is on consistency (meal logging rate: ${Math.round((decision.adherence.mealRate || 0) * 100)}%, workout completion: ${Math.round((decision.adherence.workoutRate || 0) * 100)}%)`
+    );
+  }
+  return lines.join("\n");
+}
+
 function buildSystemPrompt(ctx) {
   ctx = ctx || {};
   const lines = [
@@ -397,6 +436,29 @@ module.exports = async (req, res) => {
       res.status(200).json({ strategy });
     } catch (err) {
       res.status(500).json({ error: "Something went wrong generating the nutrition strategy." });
+    }
+    return;
+  }
+
+  if (body.mode === "rebalance") {
+    try {
+      const response = await client.messages.create({
+        model: "claude-haiku-4-5",
+        max_tokens: 150,
+        system: buildRebalancePrompt(body.profile, body.decision),
+        messages: [{ role: "user", content: "Explain this week's adjustment." }],
+      });
+      const textBlock = response.content.find((b) => b.type === "text");
+      const raw = textBlock ? textBlock.text.trim() : "";
+      const cleaned = raw.replace(/^```(json)?/i, "").replace(/```$/, "").trim();
+      const parsed = tryParseJsonLoose(cleaned);
+      if (!parsed || !parsed.explanation) {
+        res.status(500).json({ error: "Could not generate explanation." });
+        return;
+      }
+      res.status(200).json({ explanation: parsed.explanation });
+    } catch (err) {
+      res.status(500).json({ error: "Something went wrong generating the explanation." });
     }
     return;
   }

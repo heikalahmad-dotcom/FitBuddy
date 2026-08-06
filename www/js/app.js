@@ -276,6 +276,8 @@ let state = {
   nutritionPlan: null, // {calories,protein,carbs,fat,fiber,water,mealTiming,weeklyGoals,groceryRecommendations,foodsToPrioritize,foodsToReduce,restaurantGuide,healthySubstitutions,fallback}
   nutritionPlanLoading: false,
   customMealPlan: null, // {meals:{breakfast,lunch,dinner,snack}, expiresDay} — user-defined override; auto-reverts to state.plan.meals once state.today > expiresDay
+  lastRebalanceCheckDay: null, // last state.today the weekly rebalance agent ran, regardless of outcome
+  cardioAddOn: null, // {name, scheme, addedDay} — recommended extra cardio session from the rebalance agent
   today: 1, // simulated day counter
   weightLog: [], // {day, weight}
   logs: {}, // day -> {meals:[{slot,name,cal,extra,unhealthy}], workoutDone:bool, setsDone:{exIdx:[bool,...]}}
@@ -360,6 +362,17 @@ function estimateTargetWeight(goal, weight, height){
   return Math.round(target);
 }
 
+/* shared with the rebalance agent (applyRebalanceDecision), which needs to
+   re-derive protein/fat/carbs after nudging calories without recalculating
+   the whole plan from scratch (weight/age/height/goal haven't changed) */
+function deriveMacrosForCalories(p, calories){
+  const proteinPerKg = p.goal==="build_muscle"?2.0:p.goal==="lose_fat"?2.2:1.8;
+  const protein = Math.round(p.weight*proteinPerKg);
+  const fat = Math.round((calories*0.25)/9);
+  const carbs = Math.round((calories - protein*4 - fat*9)/4);
+  return {protein, fat, carbs};
+}
+
 function calcPlan(p){
   const bmrBase = 10*p.weight + 6.25*p.height - 5*p.age;
   let bmr;
@@ -377,10 +390,7 @@ function calcPlan(p){
   else calories = tdee - 150;
   calories = Math.round(calories/10)*10;
 
-  const proteinPerKg = p.goal==="build_muscle"?2.0:p.goal==="lose_fat"?2.2:1.8;
-  const protein = Math.round(p.weight*proteinPerKg);
-  const fat = Math.round((calories*0.25)/9);
-  const carbs = Math.round((calories - protein*4 - fat*9)/4);
+  const {protein, fat, carbs} = deriveMacrosForCalories(p, calories);
 
   const weeksToGoal = Math.max(1, Math.round(Math.abs(p.targetWeight-p.weight)/weeklyRate));
 
@@ -1360,11 +1370,30 @@ function renderToday(){
           <div class="ledger-meta">${scheme}</div>
         </div>`;
       }).join("")}
+      ${renderCardioAddOnRow()}
       <div style="margin-top:12px;">
         <button class="btn btn-round btn-block ${log.workoutDone?'':'btn-primary'}" onclick="toggleWorkoutDone()">${log.workoutDone?"✓ Workout logged":"Mark workout complete"}</button>
       </div>
     </div>
   `;
+}
+
+/* the rebalance agent's recommended extra cardio session, if any — shown
+   alongside the day's strength split, not folded into it, since it's an
+   addition on top of the existing template rather than a template exercise */
+function renderCardioAddOnRow(){
+  if(!state.cardioAddOn) return "";
+  const c = state.cardioAddOn;
+  return `
+    <div class="ledger-row">
+      <div class="ledger-main">
+        <span class="ledger-check" style="pointer-events:none;">➕</span>
+        <div class="exercise-thumb">🏃</div>
+        <span class="ledger-name">${escapeHtml(c.name)}</span>
+      </div>
+      <div class="ledger-meta">${escapeHtml(c.scheme)}</div>
+      <button class="pill-btn" onclick="removeCardioAddOn()">Remove</button>
+    </div>`;
 }
 
 function renderCalorieRing(loggedCal, targetCal){
@@ -2312,6 +2341,10 @@ function renderWorkoutTab(){
             <div class="ledger-meta">${scheme}</div>
           </div>`).join("")}
       `).join("")}
+      ${state.cardioAddOn ? `
+        <h3 style="font-size:15px;margin:14px 0 4px;">Added by your weekly check-in</h3>
+        ${renderCardioAddOnRow()}
+      ` : ""}
     </div>
   `;
 }
@@ -2501,24 +2534,187 @@ function renderSilhouette(frac, goal){
 function submitWeightLog(weight){
   if(!weight) return;
   state.weightLog.push({day: state.today, weight:+weight});
-  // check if off track vs expected pace
-  const p = state.profile, plan = state.plan;
-  const first = state.weightLog[0], last = {day:state.today, weight:+weight};
-  const weeksElapsed = Math.max(0.5,(last.day-first.day)/7);
-  const actualRate = Math.abs(first.weight-last.weight)/weeksElapsed;
   closeModal();
-  if(weeksElapsed>=1 && actualRate < plan.weeklyRate*0.5){
-    state.modal = {type:"offTrack", actualRate:actualRate.toFixed(2)};
-  }
+  maybeRebalanceCheck();
   render();
 }
-function adjustPlanForOffTrack(){
-  const plan = state.plan;
-  if(state.profile.goal==="lose_fat") plan.calories -= 150;
-  else if(state.profile.goal==="build_muscle") plan.calories += 150;
-  plan.meals = buildMealPlan(state.profile, plan, plan.meals);
+
+/* ============================= REBALANCE AGENT =============================
+   Weekly-cadence check that looks at trailing weight trend + logging/workout
+   adherence and decides whether the plan needs a nudge — and if so, how much.
+   Deliberately fully deterministic: only the EXPLANATION text is ever left to
+   the LLM (mode:"rebalance"), never the numbers, same split used everywhere
+   else in this app (onboarding extraction, nutrition strategy, meal-log
+   estimation) to keep the actual plan math impossible to hallucinate. */
+const SAFE_CALORIE_FLOOR = 1200; // never recommend below this regardless of goal
+const REBALANCE_CHECK_INTERVAL_DAYS = 7;
+const REBALANCE_STEP_KCAL = 150; // matches the old flat off-track nudge's magnitude
+const CARDIO_ADD_ONS = {
+  gym: {name:"Incline treadmill walk", scheme:"20-25 min, brisk pace, 2x this week"},
+  home: {name:"Outdoor walk or jog", scheme:"25-30 min, steady pace, 2x this week"},
+};
+
+/* Finds a trailing ~1-week pair of weigh-ins to read a trend from, rather
+   than the old code's "since the very first entry ever" average, which gets
+   less meaningful the longer someone's been using the app. Falls back to the
+   very first entry if there isn't yet a pair spanning a full week. */
+function findTrailingWeightWindow(){
+  const log = state.weightLog;
+  if(log.length < 2) return null;
+  const last = log[log.length-1];
+  let start = null;
+  for(let i=log.length-2; i>=0; i--){
+    if(last.day - log[i].day >= 7){ start = log[i]; break; }
+  }
+  if(!start) start = log[0];
+  const daysSpan = last.day - start.day;
+  if(daysSpan < 2) return null; // not enough spread to read a trend from yet
+  return {start, last, weeksSpan: daysSpan/7};
+}
+
+/* Meal-logging + workout-completion rate over the trailing 7 days. A slow
+   trend while adherence is already poor isn't a "tighten the plan" problem —
+   it's a "the plan isn't being followed" problem, and tightening it further
+   would make that worse, not better. */
+function computeAdherence(){
+  const windowDays = [];
+  for(let d=Math.max(1, state.today-6); d<=state.today; d++) windowDays.push(d);
+  let loggedDays=0, workoutsCompleted=0;
+  windowDays.forEach(d=>{
+    const log = state.logs[d];
+    if(log && log.meals && log.meals.length>0) loggedDays++;
+    if(log && log.workoutDone) workoutsCompleted++;
+  });
+  const workoutsExpected = Math.round((state.profile.workoutDays||0) * (windowDays.length/7));
+  return {
+    mealRate: loggedDays/windowDays.length,
+    workoutRate: workoutsExpected>0 ? Math.min(1, workoutsCompleted/workoutsExpected) : 1,
+    loggedDays, workoutsCompleted, windowDays: windowDays.length,
+  };
+}
+
+/* Returns a decision object, or null if there's nothing worth surfacing this
+   week (not enough data yet, or the user is already on pace). */
+function evaluateRebalance(){
+  const p = state.profile, plan = state.plan;
+  const adherence = computeAdherence();
+  const lowAdherence = adherence.mealRate < (4/7) || adherence.workoutRate < 0.5;
+
+  if(lowAdherence){
+    return {reason:"low_adherence", calorieAdjustment:0, newCalories:plan.calories, addCardio:false, cardio:null, adherence};
+  }
+
+  const window = findTrailingWeightWindow();
+  if(!window) return null;
+
+  const actualRate = Math.abs(window.last.weight - window.start.weight) / window.weeksSpan;
+  const targetRate = plan.weeklyRate;
+
+  let reason = null, direction = 0;
+  if(p.goal!=="maintain"){
+    if(actualRate < targetRate*0.5){ reason="slow_pace"; direction = p.goal==="lose_fat" ? -1 : 1; }
+    else if(actualRate > targetRate*1.5){ reason="fast_pace"; direction = p.goal==="lose_fat" ? 1 : -1; }
+  } else {
+    const signedChange = window.last.weight - window.start.weight;
+    if(Math.abs(signedChange)/window.weeksSpan > 0.3){
+      reason = "drift";
+      direction = signedChange > 0 ? -1 : 1; // pull back toward stable
+    }
+  }
+  if(!reason) return null; // on pace — nothing to do
+
+  const proposedCalories = plan.calories + direction*REBALANCE_STEP_KCAL;
+  const ceiling = Math.round(plan.tdee * 1.3);
+  const newCalories = Math.max(SAFE_CALORIE_FLOOR, Math.min(ceiling, proposedCalories));
+  const calorieAdjustment = newCalories - plan.calories;
+
+  const addCardio = reason==="slow_pace" && p.goal==="lose_fat" && !state.cardioAddOn;
+  const cardio = addCardio ? (CARDIO_ADD_ONS[p.location] || CARDIO_ADD_ONS.gym) : null;
+
+  if(!calorieAdjustment && !addCardio) return null; // clamped away to nothing meaningful
+
+  return {reason, actualRate, targetRate, calorieAdjustment, newCalories, addCardio, cardio, adherence};
+}
+
+function fallbackRebalanceExplanation(decision){
+  if(decision.reason==="low_adherence"){
+    return "No changes to your numbers this week — the plan only works if it's realistic to follow. Let's focus on consistency first: log your meals and get your workouts in, and we'll revisit your targets once there's a clear trend to react to.";
+  }
+  if(decision.reason==="slow_pace"){
+    return `Your pace has been a bit slower than your ${decision.targetRate}kg/wk target, so we're tightening your calories slightly for the next week${decision.addCardio?" and adding some extra cardio":""} to help close the gap.`;
+  }
+  if(decision.reason==="fast_pace"){
+    return `You're moving faster than your ${decision.targetRate}kg/wk target — that's often not sustainable long-term, so we're easing your calories back slightly to keep this steady and healthy.`;
+  }
+  if(decision.reason==="drift"){
+    return "Your weight has drifted a bit from where we'd expect for maintenance, so we're nudging your calories slightly to help bring it back toward stable.";
+  }
+  return "We've made a small adjustment to your plan based on your recent progress.";
+}
+
+/* Gated to once every REBALANCE_CHECK_INTERVAL_DAYS regardless of outcome —
+   called opportunistically (day advancing, a fresh weigh-in) rather than on
+   a real server-side schedule, since there's no backend cron yet. Returns
+   true if it set a modal, so callers can respect existing modal precedence. */
+function maybeRebalanceCheck(){
+  if(!state.profile || !state.plan) return false;
+  const lastCheck = state.lastRebalanceCheckDay || (state.weightLog[0] ? state.weightLog[0].day : 1);
+  if(state.today - lastCheck < REBALANCE_CHECK_INTERVAL_DAYS) return false;
+  state.lastRebalanceCheckDay = state.today;
+  const decision = evaluateRebalance();
+  if(!decision) return false;
+  state.modal = {type:"rebalanceRecommendation", decision, explanation: fallbackRebalanceExplanation(decision)};
+  fetchRebalanceExplanation(decision); // non-blocking — upgrades the text in place if it arrives in time
+  return true;
+}
+
+/* rescales the user's CURRENT meals to a new calorie target rather than
+   picking different ones (buildMealPlan would swap them out) — a calorie
+   nudge should feel like smaller/bigger portions of the same day, not a
+   surprise new meal plan */
+function rescaleMealsToCalories(meals, targetCalories){
+  const out = {};
+  ["breakfast","lunch","dinner","snack"].forEach(slot=>{
+    out[slot] = scaleMealToTarget(meals[slot], targetCalories*MEAL_SLOT_SHARE[slot]);
+  });
+  return out;
+}
+function applyRebalanceDecision(){
+  const m = state.modal;
+  if(!m || m.type!=="rebalanceRecommendation") return;
+  const decision = m.decision, p = state.profile, plan = state.plan;
+  if(decision.calorieAdjustment){
+    plan.calories = decision.newCalories;
+    Object.assign(plan, deriveMacrosForCalories(p, plan.calories));
+    // a custom meal plan override is an explicit opt-out of automatic meal
+    // management — only rescale the algorithmic plan, leave it untouched
+    if(!isCustomMealPlanActive()) plan.meals = rescaleMealsToCalories(plan.meals, plan.calories);
+  }
+  if(decision.addCardio && decision.cardio){
+    state.cardioAddOn = {name:decision.cardio.name, scheme:decision.cardio.scheme, addedDay:state.today};
+  }
   closeModal();
   render();
+}
+function removeCardioAddOn(){
+  state.cardioAddOn = null;
+  render();
+}
+async function fetchRebalanceExplanation(decision){
+  try{
+    const res = await fetch(`${CHAT_API_BASE}/api/chat`, {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({mode:"rebalance", profile:state.profile, decision}),
+    });
+    if(!res.ok) throw new Error("bad response");
+    const data = await res.json();
+    if(!data.explanation) throw new Error("no explanation");
+    // the modal may have been dismissed, or replaced by a different one, while we waited
+    if(!state.modal || state.modal.type!=="rebalanceRecommendation" || state.modal.decision!==decision) return;
+    state.modal.explanation = data.explanation;
+    render();
+  }catch(e){ /* keep the deterministic fallback text already shown — no worse off */ }
 }
 
 /* ============================= MODALS ============================= */
@@ -2648,15 +2844,32 @@ function renderModal(){
       <div class="field"><label>Progress photo (optional)</label><input type="file" accept="image/*"></div>
       <button class="btn btn-primary btn-block" onclick="submitWeightLog(document.getElementById('w-input').value)">Save check-in</button>
     `;
-  } else if(m.type==="offTrack"){
+  } else if(m.type==="rebalanceRecommendation"){
+    const d = m.decision;
+    const REASON_META = {
+      slow_pace: {icon:"🐢", title:"Let's pick up the pace"},
+      fast_pace: {icon:"⚡", title:"Let's ease off a bit"},
+      drift: {icon:"⚖️", title:"A small correction"},
+      low_adherence: {icon:"💛", title:"Let's focus on consistency first"},
+    };
+    const meta = REASON_META[d.reason] || {icon:"📊", title:"Weekly check-in"};
+    const hasChanges = !!d.calorieAdjustment || d.addCardio;
     inner = `
-      <div class="modal-head"><h3>You're a bit off pace</h3><button class="x-btn" onclick="closeModal();render()">✕</button></div>
-      <div class="banner" style="margin:0;"><div class="banner-icon">📉</div><div>
-        <div class="banner-text">Your actual rate of change (~${m.actualRate}kg/wk) is slower than the ${state.plan.weeklyRate}kg/wk target. We can tighten up your calorie target to get back on trajectory.</div>
+      <div class="modal-head"><h3>${meta.icon} ${meta.title}</h3><button class="x-btn" onclick="closeModal();render()">✕</button></div>
+      <div class="banner" style="margin:0;"><div class="banner-icon">${meta.icon}</div><div>
+        <div class="banner-text">${escapeHtml(m.explanation)}</div>
       </div></div>
+      ${d.calorieAdjustment ? `
+        <div class="empty-note" style="margin-top:12px;">New daily target: <span class="mono" style="color:var(--amber)">${fmt(d.newCalories)} kcal</span> (${d.calorieAdjustment>0?"+":""}${d.calorieAdjustment} kcal)</div>
+      ` : ""}
+      ${d.addCardio && d.cardio ? `
+        <div class="empty-note" style="padding-top:4px;">Adding: <b>${escapeHtml(d.cardio.name)}</b> — ${escapeHtml(d.cardio.scheme)}</div>
+      ` : ""}
       <div style="display:flex;gap:8px;margin-top:14px;">
-        <button class="btn btn-primary" onclick="adjustPlanForOffTrack()">Adjust my plan</button>
-        <button class="btn" onclick="closeModal();render()">Keep as is</button>
+        ${hasChanges
+          ? `<button class="btn btn-primary" onclick="applyRebalanceDecision()">Apply changes</button>
+             <button class="btn" onclick="closeModal();render()">Not now</button>`
+          : `<button class="btn btn-primary" onclick="closeModal();render()">Got it</button>`}
       </div>
     `;
   } else if(m.type==="inactivityNudge"){
@@ -2764,13 +2977,14 @@ function renderDemoControls(){
 function advanceDay(){
   state.today += 1;
   state.insightShown = false;
-  let planJustEnded = false;
+  let modalAlreadySet = false;
   if(state.customMealPlan && state.today > state.customMealPlan.expiresDay){
     state.customMealPlan = null;
     state.modal = {type:"customPlanEnded"};
-    planJustEnded = true;
+    modalAlreadySet = true;
   }
-  if(!planJustEnded) checkInactivityNudge();
+  if(!modalAlreadySet) modalAlreadySet = maybeRebalanceCheck();
+  if(!modalAlreadySet) checkInactivityNudge();
   render();
 }
 function backDay(){
