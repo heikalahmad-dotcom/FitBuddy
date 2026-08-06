@@ -271,6 +271,18 @@ pick a simulator/emulator or a plugged-in device and hit Run.
   for the whole thing (no weighing required, unlike the typed flow), then
   pre-fills the same review screen you'd get from typing or a photo — you
   still confirm with "Log it" before anything is recorded.
+- **Today's meals, grouped by breakfast/lunch/dinner/snack.** Instead of one
+  flat list plus a generic "extras" pile, `renderMealGroup` in `app.js`
+  shows four cards, each with the planned meal for that slot and anything
+  else actually logged for it. Every card has its own "+ Add to X" button
+  opening a chooser (`logToSlot` modal) with four ways to log: voice,
+  typing, snapping a photo (all three reuse the existing flows above,
+  just tagged with the tapped slot instead of a generic bucket), or
+  **describe a full meal** — a new `mode:"mealBreakdown"` prompt in
+  `api/chat.js` that decomposes a free-text description ("grilled chicken,
+  brown rice, and steamed broccoli") into its individual items, each
+  estimated and logged separately rather than as one combined entry, after
+  a review screen you confirm before anything is recorded.
 - **Custom meal plan override.** From Today or Diet Plan, "✏️ Use my own
   meals for a while" lets you define your own breakfast/lunch/dinner/snack
   (weight-based, same estimator as logging extras) for a set number of

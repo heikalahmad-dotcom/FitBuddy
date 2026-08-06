@@ -250,6 +250,22 @@ Respond with ONLY a single JSON object — no markdown code fences, no commentar
 
 Always return your best realistic estimate, even for vague descriptions — never ask a follow-up question, never refuse, never return placeholder or zero values.`;
 
+/* Used for mode:"mealBreakdown" — the "describe a full meal" logging option.
+   Unlike mode:"mealLog" (one combined estimate for the whole thing), this
+   decomposes a multi-food description into its individual items so each
+   gets logged as its own entry. */
+const MEAL_BREAKDOWN_PROMPT = `You are a nutrition estimation assistant. The user will describe an entire meal they ate, which may contain several distinct foods (e.g. "grilled chicken breast, brown rice, steamed broccoli, and a side salad with olive oil dressing"). Break it down into its individual food items and estimate realistic calories and macros for each one's typical portion, using contextual clues from the description when given.
+
+Respond with ONLY a single JSON object — no markdown code fences, no commentary before or after it. Use exactly this key:
+- items: array of 1-8 objects, each with:
+  - name: a short, clean label for this single food item, max 40 characters
+  - calories: integer, kcal
+  - protein: integer, grams
+  - carbs: integer, grams
+  - fat: integer, grams
+
+Always return your best realistic estimate for every item, even for vague descriptions — never ask a follow-up question, never refuse, never return an empty items array.`;
+
 /* Used for mode:"rebalance" — the weekly rebalance agent (evaluateRebalance
    in www/js/app.js) decides ALL the numbers itself (calorie adjustment,
    whether to add cardio) with zero LLM involvement; this call only turns
@@ -413,6 +429,37 @@ module.exports = async (req, res) => {
       res.status(200).json({ estimate });
     } catch (err) {
       res.status(500).json({ error: "Something went wrong estimating that meal." });
+    }
+    return;
+  }
+
+  if (body.mode === "mealBreakdown") {
+    const transcript = body.transcript;
+    if (!transcript || typeof transcript !== "string" || transcript.length > 500) {
+      res.status(400).json({ error: "Invalid description" });
+      return;
+    }
+    try {
+      const response = await client.messages.create({
+        model: "claude-haiku-4-5",
+        // up to 8 items, each with 5 fields — generous on purpose after the
+        // nutritionPlan truncation lesson (max_tokens too low silently
+        // produces unparseable cut-off JSON, not a clear error)
+        max_tokens: 800,
+        system: MEAL_BREAKDOWN_PROMPT,
+        messages: [{ role: "user", content: transcript }],
+      });
+      const textBlock = response.content.find((b) => b.type === "text");
+      const raw = textBlock ? textBlock.text.trim() : "";
+      const cleaned = raw.replace(/^```(json)?/i, "").replace(/```$/, "").trim();
+      const parsed = tryParseJsonLoose(cleaned);
+      if (!parsed || !Array.isArray(parsed.items) || !parsed.items.length) {
+        res.status(500).json({ error: "Could not break down that meal." });
+        return;
+      }
+      res.status(200).json({ items: parsed.items });
+    } catch (err) {
+      res.status(500).json({ error: "Something went wrong breaking down that meal." });
     }
     return;
   }

@@ -733,6 +733,15 @@ function loadState(){
         state.onboardChat.messages = state.onboardChat.messages.filter(m=>!m.pending);
       }
       if(state.onboardChat) state.onboardChat.voiceConversation = false;
+      // Today's meals used to group logged extras under a literal "extra"
+      // slot instead of the real meal-time they were eaten at; the new
+      // per-slot grouping only shows breakfast/lunch/dinner/snack, so old
+      // entries would otherwise just silently vanish from the UI
+      if(state.logs){
+        Object.values(state.logs).forEach(log=>{
+          if(log && log.meals) log.meals.forEach(m=>{ if(m.extra && m.slot==="extra") m.slot = "snack"; });
+        });
+      }
     }
   }catch(e){ /* corrupt or unavailable storage — start fresh */ }
 }
@@ -1373,11 +1382,8 @@ function renderToday(){
 
     <div class="card-title" style="margin:4px 0 10px;">Today's meals</div>
     ${renderCustomMealPlanBanner()}
-    ${order.map(slot=>renderTodayMealRow(slot, slot===nextSlot)).join("")}
-    ${log.meals.map((m,i)=>({...m,_idx:i})).filter(m=>m.extra).map(m=>renderExtraMealRow(m)).join("")}
-    <div style="margin:2px 0 20px;display:flex;gap:8px;flex-wrap:wrap;">
-      <button class="btn btn-sm btn-round" onclick="openModal('logExtra')">+ Log something else I ate</button>
-      <button class="btn btn-sm btn-round" onclick="openModal('snapPhoto')">📷 Snap a meal photo</button>
+    ${order.map(slot=>renderMealGroup(slot, slot===nextSlot)).join("")}
+    <div style="margin:2px 0 20px;">
       ${isCustomMealPlanActive() ? "" : `<button class="btn btn-sm btn-round" onclick="openCustomMealPlanModal()">✏️ Use my own meals for a while</button>`}
     </div>
 
@@ -1505,6 +1511,23 @@ function renderExtraMealRow(entry){
 function removeExtraMeal(mealIdx){
   todayLog().meals.splice(mealIdx, 1);
   render();
+}
+
+/* Today's meals grouped into 4 cards (breakfast/lunch/dinner/snack) rather
+   than one flat list — the planned meal for that slot, any extras actually
+   logged for that slot (typed/voice/photo/breakdown all now tag the real
+   slot instead of a generic "extra" bucket), and a way to add more. */
+function renderMealGroup(slot, isNext){
+  const log = todayLog();
+  const extras = log.meals.map((m,i)=>({...m,_idx:i})).filter(m=>m.extra && m.slot===slot);
+  const label = slot.charAt(0).toUpperCase()+slot.slice(1);
+  return `
+    <div class="card">
+      <div class="card-title">${label}</div>
+      ${renderTodayMealRow(slot, isNext)}
+      ${extras.map(m=>renderExtraMealRow(m)).join("")}
+      <button class="btn btn-sm btn-round" style="margin-top:10px;" onclick="openModal('logToSlot','${slot}')">+ Add to ${label.toLowerCase()}</button>
+    </div>`;
 }
 
 function toggleMealDone(slot){
@@ -2092,17 +2115,37 @@ async function fetchLlmReply(){
 }
 
 /* ---- swap ---- */
-function doSwap(slot){
+/* shared by the swap modal's render and doSwap() below, so "Choose" always
+   swaps to the exact alternative shown, not a freshly (and independently)
+   re-picked one — same deterministic inputs, computed once before any state
+   mutation happens, so index N here is guaranteed to mean the same meal it
+   meant when the modal was rendered */
+function getSwapAlternatives(slot){
   const current = state.plan.meals[slot];
+  const allergies = state.profile.allergies || [];
+  const target = state.plan.calories*MEAL_SLOT_SHARE[slot];
+  return MEAL_DB[slot]
+    .filter(x=>x.diet.includes(state.profile.dietPref) && x.name!==current.name && !state.dislikedFoods.includes(x.name) && (!x.allergens || !x.allergens.some(a=>allergies.includes(a))))
+    .map(x=>scaleMealToTarget(x, target));
+}
+function doSwap(slot, altIndex){
+  const current = state.plan.meals[slot];
+  const alts = getSwapAlternatives(slot); // compute before any state mutation below
+  const chosen = (altIndex!=null && alts[altIndex]) ? alts[altIndex] : null;
+
   state.foodSwapCounts[current.name] = (state.foodSwapCounts[current.name]||0) + 1;
   let justDisliked = null;
   if(state.foodSwapCounts[current.name] >= FOOD_DISLIKE_THRESHOLD && !state.dislikedFoods.includes(current.name)){
     state.dislikedFoods.push(current.name);
     justDisliked = current.name;
   }
-  const target = state.plan.calories*MEAL_SLOT_SHARE[slot];
-  const exclude = [current.name, ...state.dislikedFoods];
-  const next = pickMeal(slot, state.profile.dietPref, target, exclude, state.profile.allergies);
+  let next = chosen;
+  if(!next){
+    // no specific choice given (or it's no longer valid) — fall back to auto-pick
+    const target = state.plan.calories*MEAL_SLOT_SHARE[slot];
+    const exclude = [current.name, ...state.dislikedFoods];
+    next = pickMeal(slot, state.profile.dietPref, target, exclude, state.profile.allergies);
+  }
   state.plan.meals[slot] = next;
   closeModal();
   if(justDisliked) state.modal = {type:"foodDisliked", name:justDisliked};
@@ -2131,8 +2174,9 @@ function submitExtra(name, cal){
   const lower = name.toLowerCase();
   const unhealthy = UNHEALTHY_KEYWORDS.some(k=>lower.includes(k));
   const macros = (state.modal && state.modal.voiceMacros) ? state.modal.voiceMacros : estimateMacrosForCalories(name, cal);
+  const slot = (state.modal && state.modal.arg) || "snack";
   const log = todayLog();
-  log.meals.push({slot:"extra", name, cal:+cal, p:macros.p, c:macros.c, f:macros.f, extra:true, unhealthy});
+  log.meals.push({slot, name, cal:+cal, p:macros.p, c:macros.c, f:macros.f, extra:true, unhealthy});
   markActivityToday();
   closeModal();
   maybeCalorieOverageNudge();
@@ -2191,6 +2235,58 @@ function clearVoiceMealEstimate(){
   render();
 }
 
+/* ---- describe a full meal: decomposes a free-text description into
+   several individual logged items via mode:"mealBreakdown", instead of one
+   combined estimate like the voice/typed flows above. ---- */
+async function submitMealDescription(text){
+  text = (text||"").trim();
+  if(!text || !state.modal || state.modal.type!=="logDescribeMeal") return;
+  state.modal.text = text;
+  state.modal.loading = true;
+  state.modal.error = false;
+  render();
+  try{
+    const res = await fetch(`${CHAT_API_BASE}/api/chat`, {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({mode:"mealBreakdown", transcript:text}),
+    });
+    if(!res.ok) throw new Error("bad response");
+    const data = await res.json();
+    if(!data.items || !data.items.length) throw new Error("no items");
+    if(!state.modal || state.modal.type!=="logDescribeMeal") return; // modal closed while we waited
+    state.modal.items = data.items;
+  }catch(e){
+    if(!state.modal || state.modal.type!=="logDescribeMeal") return;
+    state.modal.error = true;
+  }
+  state.modal.loading = false;
+  render();
+}
+function confirmMealBreakdown(){
+  const m = state.modal;
+  if(!m || m.type!=="logDescribeMeal" || !m.items) return;
+  const slot = m.arg;
+  const log = todayLog();
+  m.items.forEach(it=>{
+    const name = it.name || "Logged item";
+    const lower = name.toLowerCase();
+    const unhealthy = UNHEALTHY_KEYWORDS.some(k=>lower.includes(k));
+    log.meals.push({
+      slot, name,
+      cal: Math.round(+it.calories)||0,
+      p: Math.round(+it.protein)||0,
+      c: Math.round(+it.carbs)||0,
+      f: Math.round(+it.fat)||0,
+      extra:true, unhealthy,
+    });
+  });
+  markActivityToday();
+  closeModal();
+  maybeCalorieOverageNudge();
+  render();
+}
+
 /* ---- snap photo (mock estimate) ---- */
 function estimateCaloriesFromSeed(str){
   // deterministic mock estimate seeded by some string tied to the photo
@@ -2225,8 +2321,9 @@ async function takeMealPhoto(){
 }
 function confirmPhotoLog(cal){
   const macros = estimateMacrosForCalories("Photo-logged meal", cal);
+  const slot = (state.modal && state.modal.arg) || "snack";
   const log = todayLog();
-  log.meals.push({slot:"extra", name:"Photo-logged meal", cal:+cal, p:macros.p, c:macros.c, f:macros.f, extra:true, unhealthy:false});
+  log.meals.push({slot, name:"Photo-logged meal", cal:+cal, p:macros.p, c:macros.c, f:macros.f, extra:true, unhealthy:false});
   markActivityToday();
   closeModal();
   maybeCalorieOverageNudge();
@@ -2767,15 +2864,11 @@ function renderModal(){
   if(m.type==="swap"){
     const slot = m.arg;
     const current = state.plan.meals[slot];
-    const allergies = state.profile.allergies || [];
-    const target = state.plan.calories*MEAL_SLOT_SHARE[slot];
-    const alts = MEAL_DB[slot]
-      .filter(x=>x.diet.includes(state.profile.dietPref) && x.name!==current.name && !state.dislikedFoods.includes(x.name) && (!x.allergens || !x.allergens.some(a=>allergies.includes(a))))
-      .map(x=>scaleMealToTarget(x, target));
+    const alts = getSwapAlternatives(slot);
     inner = `
       <div class="modal-head"><h3>Swap ${slot}</h3><button class="x-btn" onclick="closeModal();render()">✕</button></div>
       <div class="empty-note">Currently: ${current.name} (${current.cal} kcal)</div>
-      ${alts.map(a=>`
+      ${alts.map((a,i)=>`
         <div class="ledger-row">
           <div class="ledger-main">
             <div class="meal-thumb sm">${mealPlateSVG(a)}</div>
@@ -2784,7 +2877,7 @@ function renderModal(){
               <div class="ledger-sub">${a.cal} kcal · P${a.p}/C${a.c}/F${a.f}</div>
             </div>
           </div>
-          <button class="btn btn-sm btn-primary" onclick="doSwap('${slot}')">Choose</button>
+          <button class="btn btn-sm btn-primary" onclick="doSwap('${slot}', ${i})">Choose</button>
         </div>`).join("")}
     `;
   } else if(m.type==="calorieOverage"){
@@ -2807,6 +2900,16 @@ function renderModal(){
       <div class="modal-head"><h3>🔁 Swapped an exercise</h3><button class="x-btn" onclick="closeModal();render()">✕</button></div>
       <div class="banner" style="margin:0;"><div class="banner-icon">💡</div><div><div class="banner-text">We noticed you've been skipping <b>${m.from}</b>, so we swapped it for <b>${m.to}</b> — it works similar muscles and might suit you better.</div></div></div>
       <button class="btn btn-primary btn-block" style="margin-top:14px;" onclick="closeModal();render()">Got it</button>
+    `;
+  } else if(m.type==="logToSlot"){
+    const slot = m.arg;
+    const label = slot.charAt(0).toUpperCase()+slot.slice(1);
+    inner = `
+      <div class="modal-head"><h3>Add to ${label}</h3><button class="x-btn" onclick="closeModal();render()">✕</button></div>
+      <button class="option-card" onclick="openModal('logExtra','${slot}')"><div class="option-icon">🎤</div><div class="option-label">Voice logging</div></button>
+      <button class="option-card" onclick="openModal('logExtra','${slot}')"><div class="option-icon">⌨️</div><div class="option-label">Type in the meal</div></button>
+      <button class="option-card" onclick="openModal('logDescribeMeal','${slot}')"><div class="option-icon">📝</div><div class="option-label">Describe a full meal</div></button>
+      <button class="option-card" onclick="openModal('snapPhoto','${slot}')"><div class="option-icon">📷</div><div class="option-label">Snap a photo</div></button>
     `;
   } else if(m.type==="logExtra"){
     const hasSpeechInput = hasNativeSpeechInput() || !!(window.SpeechRecognition || window.webkitSpeechRecognition);
@@ -2842,6 +2945,31 @@ function renderModal(){
         <button class="btn btn-primary btn-block" onclick="confirmPhotoLog(document.getElementById('photo-cal').value)">Log this meal</button>`
         : `<div class="empty-note">${nativeCamera?"Tap above to take a photo and we'll estimate the calories.":"Upload a photo and we'll estimate the calories for you."}</div>`}
     `;
+  } else if(m.type==="logDescribeMeal"){
+    const slot = m.arg;
+    if(!m.items){
+      inner = `
+        <div class="modal-head"><h3>Describe your ${slot}</h3><button class="x-btn" onclick="closeModal();render()">✕</button></div>
+        <div class="empty-note">Tell us everything on your plate and we'll split it into individual items.</div>
+        <div class="field"><textarea id="describe-text" rows="3" placeholder="e.g. grilled chicken breast, brown rice, steamed broccoli, and a side salad">${m.text?escapeHtml(m.text):""}</textarea></div>
+        ${m.loading ? `<div class="empty-note">Breaking that down...</div>` : ""}
+        ${m.error ? `<div class="empty-note" style="color:var(--amber);">Couldn't break that down — try again with a bit more detail.</div>` : ""}
+        <button class="btn btn-primary btn-block" ${m.loading?'disabled style="opacity:.4;"':''} onclick="submitMealDescription(document.getElementById('describe-text').value)">${m.loading?'Breaking it down…':'Break it down'}</button>
+      `;
+    } else {
+      const total = m.items.reduce((s,it)=>s+(+it.calories||0),0);
+      inner = `
+        <div class="modal-head"><h3>Here's what we found</h3><button class="x-btn" onclick="closeModal();render()">✕</button></div>
+        ${m.items.map(it=>`
+          <div class="ledger-row">
+            <div class="ledger-name">${escapeHtml(it.name||"")}</div>
+            <div class="ledger-meta">${Math.round(it.calories)||0} kcal · P${Math.round(it.protein)||0}/C${Math.round(it.carbs)||0}/F${Math.round(it.fat)||0}</div>
+          </div>`).join("")}
+        <div class="empty-note" style="padding-top:8px;">Total: <span class="mono" style="color:var(--amber)">${total} kcal</span></div>
+        <button class="btn btn-primary btn-block" style="margin-top:12px;" onclick="confirmMealBreakdown()">Log these items to ${slot}</button>
+        <button class="btn btn-block" style="margin-top:8px;" onclick="state.modal.items=null;render()">Start over</button>
+      `;
+    }
   } else if(m.type==="workoutFeedback"){
     inner = `
       <div class="modal-head"><h3>💪 Workout logged</h3><button class="x-btn" onclick="closeModal();render()">✕</button></div>
