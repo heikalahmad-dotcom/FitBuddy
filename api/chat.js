@@ -430,12 +430,18 @@ module.exports = async (req, res) => {
       const cleaned = raw.replace(/^```(json)?/i, "").replace(/```$/, "").trim();
       const strategy = tryParseJsonLoose(cleaned);
       if (!strategy) {
-        res.status(500).json({ error: "Could not parse nutrition strategy." });
+        // TEMP DEBUG — remove once root cause is confirmed
+        res.status(500).json({
+          error: "Could not parse nutrition strategy.",
+          debugStopReason: response.stop_reason,
+          debugRawLength: raw.length,
+          debugRawTail: raw.slice(-200),
+        });
         return;
       }
       res.status(200).json({ strategy });
     } catch (err) {
-      res.status(500).json({ error: "Something went wrong generating the nutrition strategy." });
+      res.status(500).json({ error: "Something went wrong generating the nutrition strategy.", debugMessage: String(err && err.message) });
     }
     return;
   }
