@@ -103,7 +103,24 @@ const FOOD_CALORIE_DENSITY = [
   {match:/milk/, calPer100g:60, macroRatio:{p:.20,c:.50,f:.30}},
   {match:/banana|apple|pear|orange|fruit/, calPer100g:60, macroRatio:{p:.05,c:.90,f:.05}},
   {match:/berry|berries|strawberr|blueberr/, calPer100g:45, macroRatio:{p:.07,c:.85,f:.08}},
-  {match:/salad|lettuce|spinach|greens|vegetable|veggie|broccoli/, calPer100g:35, macroRatio:{p:.20,c:.65,f:.15}},
+  // popcorn (~387kcal/100g, dried/expanded) MUST come before the starchy-
+  // vegetable entry below — it contains "corn" as a substring but is a
+  // completely different food (was falling through to the unrecognized-food
+  // default of 180 entirely, same underlying gap as cucumber below)
+  {match:/popcorn/, calPer100g:387, macroRatio:{p:.13,c:.77,f:.10}},
+  // starchy vegetables (potato, sweet potato, corn, peas, ~81-87kcal/100g)
+  // are meaningfully denser than leafy ones - bundling them with the group
+  // below would underestimate by ~2.5x, the opposite problem from cucumber
+  {match:/\bpotato\b|sweet potato|\bpeas\b|\bcorn\b/, calPer100g:86, macroRatio:{p:.10,c:.85,f:.05}},
+  // most specific vegetable names weren't covered at all (only the generic
+  // words "salad/vegetable/veggie" plus lettuce/spinach/broccoli were) - a
+  // food that matches NO entry falls all the way through to
+  // DEFAULT_CAL_PER_100G (180, meant for unrecognized MIXED dishes like a
+  // casserole), not a simple low-calorie vegetable. That's what was
+  // happening to cucumber (really ~15kcal/100g): 100g logged as 180kcal
+  // instead of ~15, over 10x too high. These all cluster in the real
+  // ~15-41kcal/100g range, so one shared entry is a reasonable fit.
+  {match:/salad|lettuce|spinach|greens|vegetable|veggie|broccoli|cucumber|tomato|zucchini|cauliflower|cabbage|celery|pepper|mushroom|asparagus|radish|green beans|carrot|onion|kale/, calPer100g:35, macroRatio:{p:.20,c:.65,f:.15}},
 ];
 const DEFAULT_CAL_PER_100G = 180; // reasonable fallback for unrecognized mixed foods
 const DEFAULT_MACRO_RATIO = {p:.20,c:.50,f:.30};
