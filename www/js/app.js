@@ -465,7 +465,12 @@ async function generateNutritionStrategy(p, plan){
     if(!res.ok) throw new Error("bad response");
     const data = await res.json();
     if(!data.strategy) throw new Error("no strategy");
-    state.nutritionPlan = Object.assign({}, targets, data.strategy, {fallback:false});
+    // targets is spread LAST so the six numeric fields can never come from the
+    // model's response, even if it doesn't perfectly follow the "use the
+    // exact value given, don't recalculate" instruction — only the seven
+    // qualitative fields (mealTiming, weeklyGoals, ...) are actually the
+    // model's to decide, and targets has no keys that would touch those
+    state.nutritionPlan = Object.assign({}, data.strategy, targets, {fallback:false});
   }catch(e){
     state.nutritionPlan = fallbackNutritionStrategy(p, targets);
   }
