@@ -737,6 +737,30 @@ function loadState(){
   }catch(e){ /* corrupt or unavailable storage — start fresh */ }
 }
 
+/* type="number" inputs can't have their cursor position restored on a
+   re-render: selectionStart/selectionEnd read back null for them, and
+   setSelectionRange() throws (caught below in restoreFocus), so the restore
+   silently no-ops and the browser drops the cursor to position 0 after every
+   keystroke-triggered render. That makes every new digit get typed at the
+   FRONT instead of where you're actually typing — "140" comes out "041".
+   Numeric fields use type="text" + inputmode instead (still gets the mobile
+   numeric keyboard, and cursor restoration works like any normal text
+   field), with this helper stripping anything that isn't a digit (and, if
+   allowed, a single decimal point) so the value is still always numeric. */
+function sanitizeNumericInput(el, allowDecimal){
+  let v = el.value.replace(allowDecimal ? /[^0-9.]/g : /[^0-9]/g, "");
+  if(allowDecimal){
+    const firstDot = v.indexOf(".");
+    if(firstDot!==-1) v = v.slice(0,firstDot+1) + v.slice(firstDot+1).replace(/\./g,"");
+  }
+  if(v!==el.value){
+    const pos = Math.max(0, el.selectionStart - (el.value.length - v.length));
+    el.value = v;
+    el.setSelectionRange(pos, pos);
+  }
+  return v;
+}
+
 /* ============================= RENDER ROOT ============================= */
 /* Every render() call rebuilds the relevant innerHTML from scratch (no vdom
    diffing), which would normally drop focus/cursor position out of whatever
@@ -825,7 +849,7 @@ function renderOnboarding(){
           </select>
         </div>
         <div class="field"><label>Age</label>
-          <input id="ob-age" type="number" min="16" max="90" value="${p.age||''}" oninput="setProfile('age', +this.value)">
+          <input id="ob-age" type="text" inputmode="numeric" value="${p.age||''}" oninput="setProfile('age', +sanitizeNumericInput(this,false))">
         </div>
         <div class="field">
           <div class="field-label-row"><label style="margin-bottom:0;">Height</label>
@@ -834,7 +858,7 @@ function renderOnboarding(){
               <button type="button" class="unit-btn ${heightUnit==='in'?'active':''}" onclick="setHeightUnit('in')">in</button>
             </div>
           </div>
-          <input id="ob-height" type="number" step="0.1" min="${heightMin}" max="${heightMax}" value="${displayHeight(p.height, heightUnit)}" oninput="setHeightInput(this.value)">
+          <input id="ob-height" type="text" inputmode="decimal" value="${displayHeight(p.height, heightUnit)}" oninput="setHeightInput(sanitizeNumericInput(this,true))">
         </div>
         <div class="field">
           <div class="field-label-row"><label style="margin-bottom:0;">Current weight</label>
@@ -843,11 +867,16 @@ function renderOnboarding(){
               <button type="button" class="unit-btn ${weightUnit==='lb'?'active':''}" onclick="setWeightUnit('lb')">lb</button>
             </div>
           </div>
-          <input id="ob-weight" type="number" step="0.1" min="${weightMin}" max="${weightMax}" value="${displayWeight(p.weight, weightUnit)}" oninput="setWeightInput(this.value)">
+          <input id="ob-weight" type="text" inputmode="decimal" value="${displayWeight(p.weight, weightUnit)}" oninput="setWeightInput(sanitizeNumericInput(this,true))">
         </div>
         <div class="field">
-          <label>Target weight (${weightUnit})</label>
-          <input id="ob-target-weight" type="number" step="0.1" min="${weightMin}" max="${weightMax}" value="${displayWeight(p.targetWeight, weightUnit)}" oninput="setTargetWeightInput(this.value)">
+          <div class="field-label-row"><label style="margin-bottom:0;">Target weight</label>
+            <div class="unit-toggle">
+              <button type="button" class="unit-btn ${weightUnit==='kg'?'active':''}" onclick="setWeightUnit('kg')">kg</button>
+              <button type="button" class="unit-btn ${weightUnit==='lb'?'active':''}" onclick="setWeightUnit('lb')">lb</button>
+            </div>
+          </div>
+          <input id="ob-target-weight" type="text" inputmode="decimal" value="${displayWeight(p.targetWeight, weightUnit)}" oninput="setTargetWeightInput(sanitizeNumericInput(this,true))">
           ${(p.goal && p.weight && p.height) ? `<div class="empty-note" style="padding-top:4px;">Estimated for your goal: <span class="mono" style="color:var(--amber)">${displayWeight(estimateTargetWeight(p.goal,p.weight,p.height), weightUnit)}${weightUnit}</span> — feel free to adjust.</div>` : ""}
         </div>
       </div>`;
@@ -2793,10 +2822,10 @@ function renderModal(){
         <div class="empty-note" style="text-align:center;">or type it in below</div>
       ` : ""}
       <div class="field"><label>What did you have?</label><input id="extra-name" type="text" placeholder="e.g. grilled chicken breast" value="${m.name||''}" oninput="updateExtraEstimate()"></div>
-      ${!m.voiceMacros ? `<div class="field"><label>Weight (grams)</label><input id="extra-weight" type="number" placeholder="e.g. 150" value="${m.weight||''}" oninput="updateExtraEstimate()"></div>` : ""}
+      ${!m.voiceMacros ? `<div class="field"><label>Weight (grams)</label><input id="extra-weight" type="text" inputmode="numeric" placeholder="e.g. 150" value="${m.weight||''}" oninput="sanitizeNumericInput(this,false);updateExtraEstimate()"></div>` : ""}
       ${m.estimate ? `
         <div class="empty-note">Estimated: <span class="mono" style="color:var(--amber)">${m.estimate} kcal</span> (auto-estimate — feel free to adjust)${m.voiceMacros?` · <a href="#" onclick="event.preventDefault();clearVoiceMealEstimate()" style="color:var(--text-dim);">clear &amp; enter manually</a>`:""}</div>
-        <div class="field"><label>Calories</label><input id="extra-cal" type="number" value="${m.estimate}"></div>
+        <div class="field"><label>Calories</label><input id="extra-cal" type="text" inputmode="numeric" value="${m.estimate}" oninput="sanitizeNumericInput(this,false)"></div>
         <button class="btn btn-primary btn-block" onclick="submitExtra(document.getElementById('extra-name').value, document.getElementById('extra-cal').value)">Log it</button>`
         : `<div class="empty-note">Enter what you ate and its weight, and we'll estimate the calories for you.</div>`}
     `;
@@ -2809,7 +2838,7 @@ function renderModal(){
         : `<div class="field"><input type="file" accept="image/*" onchange="handlePhotoUpload(this)"></div>`}
       ${m.preview?`<img src="${m.preview}" style="width:100%;border-radius:10px;margin:10px 0;">
         <div class="empty-note">Estimated: <span class="mono" style="color:var(--amber)">${m.estimate} kcal</span> (auto-estimate — feel free to adjust)</div>
-        <div class="field"><input id="photo-cal" type="number" value="${m.estimate}"></div>
+        <div class="field"><input id="photo-cal" type="text" inputmode="numeric" value="${m.estimate}" oninput="sanitizeNumericInput(this,false)"></div>
         <button class="btn btn-primary btn-block" onclick="confirmPhotoLog(document.getElementById('photo-cal').value)">Log this meal</button>`
         : `<div class="empty-note">${nativeCamera?"Tap above to take a photo and we'll estimate the calories.":"Upload a photo and we'll estimate the calories for you."}</div>`}
     `;
@@ -2840,7 +2869,7 @@ function renderModal(){
   } else if(m.type==="logWeight"){
     inner = `
       <div class="modal-head"><h3>Log weight</h3><button class="x-btn" onclick="closeModal();render()">✕</button></div>
-      <div class="field"><label>Current weight (kg)</label><input id="w-input" type="number" value="${state.weightLog[state.weightLog.length-1].weight}"></div>
+      <div class="field"><label>Current weight (kg)</label><input id="w-input" type="text" inputmode="decimal" value="${state.weightLog[state.weightLog.length-1].weight}" oninput="sanitizeNumericInput(this,true)"></div>
       <div class="field"><label>Progress photo (optional)</label><input type="file" accept="image/*"></div>
       <button class="btn btn-primary btn-block" onclick="submitWeightLog(document.getElementById('w-input').value)">Save check-in</button>
     `;
@@ -2899,7 +2928,7 @@ function renderModal(){
           <label>${slot.charAt(0).toUpperCase()+slot.slice(1)}</label>
           <div class="grid-2">
             <input id="cmp-${slot}-name" type="text" placeholder="What will you eat?" value="${s.name||''}" oninput="updateCustomMealSlot('${slot}')">
-            <input id="cmp-${slot}-weight" type="number" placeholder="Weight (g)" value="${s.weight||''}" oninput="updateCustomMealSlot('${slot}')">
+            <input id="cmp-${slot}-weight" type="text" inputmode="numeric" placeholder="Weight (g)" value="${s.weight||''}" oninput="sanitizeNumericInput(this,false);updateCustomMealSlot('${slot}')">
           </div>
           ${s.estimate ? `<div class="empty-note" style="padding-top:4px;">~${s.estimate} kcal</div>` : ""}
         </div>`;
