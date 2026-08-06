@@ -421,7 +421,12 @@ module.exports = async (req, res) => {
     try {
       const response = await client.messages.create({
         model: "claude-haiku-4-5",
-        max_tokens: 900,
+        // 13 fields including several arrays with an embedded "because ..."
+        // reason on every item routinely runs well past 900 tokens and gets
+        // cut off mid-JSON (confirmed via stop_reason:"max_tokens" while
+        // diagnosing a live parse-failure report) — this is comfortably
+        // more than the longest real response seen so far.
+        max_tokens: 2000,
         system: buildNutritionPlanPrompt(body.profile, body.targets),
         messages: [{ role: "user", content: "Generate my nutrition strategy now." }],
       });
@@ -430,18 +435,12 @@ module.exports = async (req, res) => {
       const cleaned = raw.replace(/^```(json)?/i, "").replace(/```$/, "").trim();
       const strategy = tryParseJsonLoose(cleaned);
       if (!strategy) {
-        // TEMP DEBUG — remove once root cause is confirmed
-        res.status(500).json({
-          error: "Could not parse nutrition strategy.",
-          debugStopReason: response.stop_reason,
-          debugRawLength: raw.length,
-          debugRawTail: raw.slice(-200),
-        });
+        res.status(500).json({ error: "Could not parse nutrition strategy." });
         return;
       }
       res.status(200).json({ strategy });
     } catch (err) {
-      res.status(500).json({ error: "Something went wrong generating the nutrition strategy.", debugMessage: String(err && err.message) });
+      res.status(500).json({ error: "Something went wrong generating the nutrition strategy." });
     }
     return;
   }
