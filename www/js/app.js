@@ -44,10 +44,24 @@ const MEAL_SLOT_SHARE = {breakfast:0.25, lunch:0.3, dinner:0.3, snack:0.15};
    macro grams for free-text/photo-logged food, same rough-estimate spirit as
    the calorie density itself. */
 const FOOD_CALORIE_DENSITY = [
-  {match:/butter|\boil\b|mayo/, calPer100g:720, macroRatio:{p:0,c:0,f:1}},
+  {match:/butter|mayo/, calPer100g:720, macroRatio:{p:0,c:0,f:1}},
+  // pure oil is ~884kcal/100g (100% fat) vs butter/mayo's ~720 (has water/egg
+  // content diluting it) — bundled together this was underestimating oil by
+  // ~20-25%; \b word boundaries avoid matching "oil" inside words like "broiled"
+  {match:/\boil\b/, calPer100g:884, macroRatio:{p:0,c:0,f:1}},
   {match:/nuts?|almond|peanut|cashew|walnut/, calPer100g:580, macroRatio:{p:.13,c:.15,f:.72}},
-  {match:/chips|fries|crisps/, calPer100g:540, macroRatio:{p:.05,c:.45,f:.50}},
-  {match:/chocolate|candy|cookie|donut|doughnut|cake|pastry/, calPer100g:480, macroRatio:{p:.05,c:.55,f:.40}},
+  // fries (~312kcal/100g, real potato content retains moisture) are a lot
+  // less calorie-dense than chips/crisps (~540, dehydrated) - lumped
+  // together this overestimated fries by ~40-70%
+  {match:/fries/, calPer100g:312, macroRatio:{p:.04,c:.52,f:.44}},
+  {match:/chips|crisps/, calPer100g:540, macroRatio:{p:.05,c:.45,f:.50}},
+  // candy (gummy/hard, ~325-394kcal/100g, mostly sugar) was inheriting the
+  // heavier chocolate/cookie/cake default (480) - overestimating by ~25-40%
+  {match:/candy|gummy|jelly bean/, calPer100g:360, macroRatio:{p:.01,c:.94,f:.05}},
+  // lighter cakes (angel food, sponge, ~258-300kcal/100g) were also getting
+  // the 480 default calibrated for denser desserts - overestimating by up to ~60%
+  {match:/cake/, calPer100g:300, macroRatio:{p:.06,c:.58,f:.36}},
+  {match:/chocolate|cookie|donut|doughnut|pastry/, calPer100g:480, macroRatio:{p:.05,c:.55,f:.40}},
   {match:/cream cheese/, calPer100g:342, macroRatio:{p:.07,c:.05,f:.88}},
   {match:/bacon|sausage|salami|pepperoni/, calPer100g:420, macroRatio:{p:.30,c:.02,f:.68}},
   {match:/feta/, calPer100g:264, macroRatio:{p:.21,c:.06,f:.73}},
@@ -66,9 +80,21 @@ const FOOD_CALORIE_DENSITY = [
   {match:/bread|bagel|toast|bun\b|roll/, calPer100g:270, macroRatio:{p:.13,c:.75,f:.12}},
   {match:/ice cream/, calPer100g:210, macroRatio:{p:.07,c:.50,f:.43}},
   {match:/avocado/, calPer100g:160, macroRatio:{p:.05,c:.20,f:.75}},
+  // dark/skin-on chicken (thigh, drumstick, ~209kcal/100g) is roughly 50%
+  // more calorie-dense than the breast-calibrated generic entry (165) below
+  {match:/thigh|drumstick|dark meat/, calPer100g:209, macroRatio:{p:.50,c:0,f:.50}},
   {match:/chicken|turkey|poultry/, calPer100g:165, macroRatio:{p:.75,c:0,f:.25}},
+  // egg whites (~52kcal/100g, almost pure protein) were matching the whole-egg
+  // entry below (155, includes the fattier yolk) - a ~3x overestimate, and a
+  // food fitness users specifically log BECAUSE they're avoiding the yolk
+  {match:/egg white/, calPer100g:52, macroRatio:{p:.85,c:.05,f:.10}},
   {match:/egg/, calPer100g:155, macroRatio:{p:.35,c:.03,f:.62}},
-  {match:/fish|salmon|tuna|shrimp|seafood/, calPer100g:150, macroRatio:{p:.60,c:0,f:.40}},
+  // salmon (~208kcal/100g, fattier) and shrimp/white fish (~90-105, very
+  // lean) sit at opposite ends of the generic "fish" bucket (150) below -
+  // salmon was underestimated ~28%, shrimp/white fish overestimated ~40-65%
+  {match:/salmon/, calPer100g:208, macroRatio:{p:.42,c:0,f:.58}},
+  {match:/shrimp|prawn|cod|tilapia|halibut|white fish/, calPer100g:97, macroRatio:{p:.85,c:.02,f:.13}},
+  {match:/fish|tuna|seafood/, calPer100g:150, macroRatio:{p:.60,c:0,f:.40}},
   {match:/rice|pasta|noodle|quinoa/, calPer100g:150, macroRatio:{p:.10,c:.85,f:.05}},
   {match:/wine/, calPer100g:83, macroRatio:{p:0,c:1,f:0}},
   {match:/beer/, calPer100g:43, macroRatio:{p:.05,c:.95,f:0}},
