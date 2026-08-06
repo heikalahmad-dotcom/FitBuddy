@@ -48,7 +48,18 @@ const FOOD_CALORIE_DENSITY = [
   {match:/nuts?|almond|peanut|cashew|walnut/, calPer100g:580, macroRatio:{p:.13,c:.15,f:.72}},
   {match:/chips|fries|crisps/, calPer100g:540, macroRatio:{p:.05,c:.45,f:.50}},
   {match:/chocolate|candy|cookie|donut|doughnut|cake|pastry/, calPer100g:480, macroRatio:{p:.05,c:.55,f:.40}},
+  {match:/cream cheese/, calPer100g:342, macroRatio:{p:.07,c:.05,f:.88}},
   {match:/bacon|sausage|salami|pepperoni/, calPer100g:420, macroRatio:{p:.30,c:.02,f:.68}},
+  {match:/feta/, calPer100g:264, macroRatio:{p:.21,c:.06,f:.73}},
+  {match:/mozzarella/, calPer100g:254, macroRatio:{p:.39,c:.05,f:.56}},
+  {match:/ricotta/, calPer100g:174, macroRatio:{p:.26,c:.07,f:.67}},
+  // cottage cheese and the other soft-cheese entries above MUST come before
+  // the generic /cheese/ match below — Array.find takes the first hit, and
+  // the generic entry is calibrated for dense hard cheese (cheddar/parmesan,
+  // ~400kcal/100g), not soft cheese - it was silently giving cottage cheese
+  // (really ~98kcal/100g) a 4x-too-high estimate, and the wrong macro split
+  // (high-fat/low-protein instead of the true high-protein/low-fat)
+  {match:/cottage cheese/, calPer100g:98, macroRatio:{p:.46,c:.14,f:.40}},
   {match:/cheese/, calPer100g:400, macroRatio:{p:.25,c:.02,f:.73}},
   {match:/burger|steak|red meat|beef/, calPer100g:250, macroRatio:{p:.35,c:.05,f:.60}},
   {match:/pizza/, calPer100g:270, macroRatio:{p:.15,c:.40,f:.45}},
